@@ -421,11 +421,13 @@ ipcMain.handle('workspace:scanPages', async (_e, { workspaceId, chapters }) => {
   }
 })
 
-// Run the ghép-rồi-cắt pipeline for a chapter — vstack all page strips,
-// detect whitespace gaps, crop into individual panels. Output lands in
-// <ws>/pages/<chapter-slug>/_panels/. Workspace scanPages then prefers
-// this folder for downstream steps.
-ipcMain.handle('chapter:splitPanels', async (evt, { workspaceId, chapterSlug, opts }) => {
+// Split a chapter's raw page strips into individual panel JPGs.
+//   mode: 'ai' (default) — Gemini Vision detects panel bboxes per strip.
+//                          Costs ~$0.005/page. Cached in _meta.json.
+//   mode: 'cv'            — Whitespace gap detection (free, offline).
+//                          Less reliable on manga with bright backgrounds.
+// Output: <ws>/pages/<chapter-slug>/_panels/panel_NNN.jpg + _meta.json
+ipcMain.handle('chapter:splitPanels', async (evt, { workspaceId, chapterSlug, opts, mode }) => {
   try {
     if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
     const wsRoot = workspace.workspaceDir(app.getPath('userData'), workspaceId)
@@ -441,20 +443,27 @@ ipcMain.handle('chapter:splitPanels', async (evt, { workspaceId, chapterSlug, op
       .map(f => path.join(pagesDir, f))
     if (stripFiles.length === 0) return { ok: false, error: 'Folder pages trống.' }
 
-    // Wipe + recreate panels dir for clean re-run
     if (fs.existsSync(panelsDir)) {
       try { fs.rmSync(panelsDir, { recursive: true, force: true }) } catch {}
     }
 
     const onProgress = info => evt.sender.send('chapter:splitPanels:progress', info)
     const panelSplit = require('./video/panelSplit.cjs')
-    const result = await panelSplit.splitChapterPanels({
-      stripPaths: stripFiles,
-      outDir: panelsDir,
-      opts: opts || {},
-      onProgress
-    })
-    return { ok: true, data: { ...result, panelsDir } }
+    const useAI = mode !== 'cv'
+    const result = useAI
+      ? await panelSplit.splitChapterPanelsAI({
+          stripPaths: stripFiles,
+          outDir: panelsDir,
+          opts: opts || {},
+          onProgress
+        })
+      : await panelSplit.splitChapterPanels({
+          stripPaths: stripFiles,
+          outDir: panelsDir,
+          opts: opts || {},
+          onProgress
+        })
+    return { ok: true, data: { ...result, panelsDir, mode: useAI ? 'ai' : 'cv' } }
   } catch (e) {
     return { ok: false, error: e.message }
   }

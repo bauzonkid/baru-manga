@@ -103,12 +103,13 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   const [downloadError, setDownloadError] = useState<Map<string, string>>(new Map())
   const [activeDownloadChId, setActiveDownloadChId] = useState<string | null>(null)
 
-  // ── Step 3.5: Panel split (ghép strip → cắt panels theo whitespace) ──
+  // ── Step 3.5: Panel split (AI Vision detect or CV whitespace) ────────
   const [splitBusy, setSplitBusy] = useState<Set<string>>(new Set())
   const [splitPhase, setSplitPhase] = useState<Map<string, string>>(new Map())
   const [splitError, setSplitError] = useState<Map<string, string>>(new Map())
-  const [splitResult, setSplitResult] = useState<Map<string, { panelCount: number; sourceStrips: number }>>(new Map())
+  const [splitResult, setSplitResult] = useState<Map<string, { panelCount: number; sourceStrips: number; mode?: string }>>(new Map())
   const [activeSplitChId, setActiveSplitChId] = useState<string | null>(null)
+  const [splitMode, setSplitMode] = useState<'ai' | 'cv'>('ai')
 
   // Subscribe panel-split progress
   useEffect(() => {
@@ -118,6 +119,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
       const label = info.phase === 'concat' ? 'Ghép strip...'
         : info.phase === 'detect' ? 'Phát hiện gap...'
         : info.phase === 'crop' ? `Cắt panels ${info.i || 0}/${info.total || '?'}`
+        : info.phase === 'ai-detect' ? `AI đọc page ${info.i || 0}/${info.total || '?'}`
+        : info.phase === 'ai-crop' ? `Cắt panels từ page ${info.i || 0}/${info.total || '?'}`
         : info.phase
       setSplitPhase(prev => new Map(prev).set(activeSplitChId, info.msg || label))
     })
@@ -589,11 +592,12 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     setSplitError(prev => { const n = new Map(prev); n.delete(chId); return n })
     setActiveSplitChId(chId)
     try {
-      const r = await window.api.chapter.splitPanels(ws.id, `ch${ch.number}`)
+      const r = await window.api.chapter.splitPanels(ws.id, `ch${ch.number}`, undefined, splitMode)
       if (!r.ok) throw new Error(r.error)
       setSplitResult(prev => new Map(prev).set(chId, {
         panelCount: r.data.panelCount,
-        sourceStrips: r.data.sourceStrips
+        sourceStrips: r.data.sourceStrips,
+        mode: r.data.mode
       }))
       // Refresh localPaths to point at the new _panels/ files
       if (window.api?.workspace) {
@@ -1432,28 +1436,40 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 })}
               </div>
 
-              {/* Panel split block — opt-in pipeline: ghép all strip + cắt theo whitespace */}
+              {/* Panel split block — opt-in pipeline: AI Vision OR CV whitespace */}
               {allSelectedDownloaded && (
                 <div
                   className="mt-5 p-3 rounded-md"
                   style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
                 >
-                  <div className="flex items-center justify-between mb-3">
-                    <div>
+                  <div className="flex items-center justify-between mb-3 gap-3">
+                    <div className="min-w-0">
                       <div className="text-xs font-medium text-zinc-200">🔪 Tách panels (tuỳ chọn)</div>
                       <div className="text-[11px] text-zinc-500 mt-0.5">
-                        Ghép tất cả strip thành 1 ảnh dài → phát hiện khoảng trắng → cắt ra panels riêng.
-                        Sau khi tách, AI + render đều dùng panels thay vì strip.
+                        Cắt mỗi strip ra thành panels riêng. Sau khi tách, AI + render đều dùng panels thay vì strip.
                       </div>
                     </div>
-                    <button
-                      onClick={splitPanelsForAllSelected}
-                      disabled={splitBusy.size > 0}
-                      className="px-3 py-1.5 rounded-md text-xs font-medium text-white shrink-0 disabled:opacity-50"
-                      style={{ backgroundColor: '#f43f5e' }}
-                    >
-                      {splitBusy.size > 0 ? `Đang tách...` : 'Tách tất cả'}
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <select
+                        value={splitMode}
+                        onChange={e => setSplitMode(e.target.value as 'ai' | 'cv')}
+                        disabled={splitBusy.size > 0}
+                        className="px-2 py-1.5 text-[11px] rounded outline-none"
+                        style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                        title="AI: Gemini Vision đọc bbox panels (chính xác hơn, ~$0.005/page). CV: whitespace detection (free, đôi khi miss)."
+                      >
+                        <option value="ai">🤖 AI Vision (recommended)</option>
+                        <option value="cv">⚙ CV whitespace (free)</option>
+                      </select>
+                      <button
+                        onClick={splitPanelsForAllSelected}
+                        disabled={splitBusy.size > 0}
+                        className="px-3 py-1.5 rounded-md text-xs font-medium text-white shrink-0 disabled:opacity-50"
+                        style={{ backgroundColor: '#f43f5e' }}
+                      >
+                        {splitBusy.size > 0 ? `Đang tách...` : 'Tách tất cả'}
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-1.5">

@@ -17,6 +17,88 @@ const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const { resolveFfmpeg, resolveFfprobe } = require('./cinematic.cjs')
+const { callRouter } = require('../ai/router.cjs')
+
+// Vision-capable models — try in order, fall back on 429/error
+const VISION_MODELS_PANEL_DETECT = [
+  'gemini/gemini-2.5-flash',
+  'gemini/gemini-2.0-flash',
+  'gemini/gemini-2.5-flash-lite'
+]
+
+const PANEL_DETECT_PROMPT = `You are looking at a single page from a manga chapter. The page is a tall vertical image that may contain ONE OR MORE comic panels stacked top-to-bottom, separated by whitespace gaps.
+
+Identify each panel as a vertical region. Return ONLY this JSON (no markdown, no commentary):
+
+{
+  "panels": [
+    { "yTopPct": <0.0-1.0>, "yBottomPct": <0.0-1.0> },
+    ...
+  ]
+}
+
+Rules:
+- yTopPct and yBottomPct are vertical coordinates normalized to image height. 0.0 = top of image, 1.0 = bottom.
+- List panels top-to-bottom in reading order.
+- The region [yTopPct, yBottomPct] should TIGHTLY enclose the panel content — exclude whitespace/gaps ABOVE and BELOW it.
+- Don't overlap: yTopPct of panel N must be > yBottomPct of panel N-1.
+- If the whole page is a single panel filling the image, return one entry { "yTopPct": 0.0, "yBottomPct": 1.0 }.
+- Exclude any publisher watermark or chapter footer at the very bottom (if it's clearly separate from the last panel).
+
+Return ONLY the JSON object.`
+
+async function detectPanelsViaAI(imagePath) {
+  if (!fs.existsSync(imagePath)) throw new Error(`Image not found: ${imagePath}`)
+  const buf = fs.readFileSync(imagePath)
+  const ext = path.extname(imagePath).slice(1).toLowerCase()
+  const mime = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/jpeg'
+  const base64 = buf.toString('base64')
+  const content = [
+    { type: 'text', text: PANEL_DETECT_PROMPT },
+    { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } }
+  ]
+  let lastError = ''
+  for (const model of VISION_MODELS_PANEL_DETECT) {
+    try {
+      const res = await callRouter(model, {
+        messages: [{ role: 'user', content }],
+        temperature: 0,
+        max_tokens: 1024,
+        response_format: { type: 'json_object' },
+        stream: false
+      })
+      if (!res.ok) { lastError = `${model}: HTTP ${res.status}`; continue }
+      const data = await res.json()
+      const text = data.choices?.[0]?.message?.content || '{}'
+      let parsed = null
+      try { parsed = JSON.parse(text) } catch {
+        const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+        if (fenced) { try { parsed = JSON.parse(fenced[1]) } catch {} }
+      }
+      const raw = Array.isArray(parsed?.panels) ? parsed.panels : []
+      const clean = []
+      for (const p of raw) {
+        const top = Math.max(0, Math.min(1, Number(p?.yTopPct)))
+        const bot = Math.max(0, Math.min(1, Number(p?.yBottomPct)))
+        if (!Number.isFinite(top) || !Number.isFinite(bot)) continue
+        if (bot - top < 0.02) continue // skip slivers < 2% height
+        // Enforce no overlap with previous (clamp top)
+        const lastEnd = clean.length > 0 ? clean[clean.length - 1].yBottomPct : 0
+        const fixedTop = Math.max(top, lastEnd)
+        if (bot - fixedTop < 0.02) continue
+        clean.push({ yTopPct: fixedTop, yBottomPct: bot })
+      }
+      if (clean.length === 0) {
+        // AI returned junk — treat whole page as one panel
+        return [{ yTopPct: 0, yBottomPct: 1 }]
+      }
+      return clean
+    } catch (e) {
+      lastError = `${model}: ${e.message}`
+    }
+  }
+  throw new Error(`AI panel detect failed: ${lastError}`)
+}
 
 function probeImageDimensions(imagePath) {
   return new Promise((resolve, reject) => {
@@ -314,8 +396,87 @@ async function splitChapterPanels({ stripPaths, outDir, onProgress, opts = {} })
   return { panelPaths, panelCount: panelPaths.length, sourceStrips: stripPaths.length }
 }
 
+/**
+ * AI-based variant: send each strip to Gemini Vision, get panel bounding
+ * boxes, ffmpeg crop. No vstack — each strip processed independently. Cost
+ * ~$0.005 per page (Flash). For a 79-page chapter ≈ $0.05–0.10 + 3–5 min.
+ * Results cached in _meta.json so re-run is free.
+ */
+async function splitChapterPanelsAI({ stripPaths, outDir, onProgress, opts = {} }) {
+  if (!Array.isArray(stripPaths) || stripPaths.length === 0) {
+    throw new Error('splitChapterPanelsAI: no strip paths')
+  }
+  fs.mkdirSync(outDir, { recursive: true })
+
+  const panelPaths = []
+  const allBboxes = []
+  let panelIdx = 0
+
+  for (let s = 0; s < stripPaths.length; s++) {
+    const stripPath = stripPaths[s]
+    onProgress?.({
+      phase: 'ai-detect',
+      i: s + 1,
+      total: stripPaths.length,
+      msg: `AI nhận panel page ${s + 1}/${stripPaths.length}...`
+    })
+
+    let bboxes
+    try {
+      bboxes = await detectPanelsViaAI(stripPath)
+    } catch (e) {
+      console.warn(`[splitChapterPanelsAI] page ${s + 1} AI fail (${e.message}), fallback whole page`)
+      bboxes = [{ yTopPct: 0, yBottomPct: 1 }]
+    }
+
+    const { width, height } = await probeImageDimensions(stripPath)
+    onProgress?.({
+      phase: 'ai-crop',
+      i: s + 1,
+      total: stripPaths.length,
+      msg: `Cắt ${bboxes.length} panel từ page ${s + 1}...`
+    })
+    for (let b = 0; b < bboxes.length; b++) {
+      const bb = bboxes[b]
+      const yTop = Math.max(0, Math.floor(bb.yTopPct * height))
+      const yBot = Math.min(height, Math.ceil(bb.yBottomPct * height))
+      const cropH = yBot - yTop
+      if (cropH < 50) continue
+      panelIdx++
+      const outName = `panel_${String(panelIdx).padStart(3, '0')}.jpg`
+      const outPath = path.join(outDir, outName)
+      await cropVertical(stripPath, yTop, cropH, outPath, opts.outputQuality || 3)
+      panelPaths.push(outPath)
+      allBboxes.push({
+        panelIdx,
+        sourceStrip: s,
+        sourcePage: path.basename(stripPath),
+        yTopPct: bb.yTopPct,
+        yBottomPct: bb.yBottomPct,
+        yTopPx: yTop,
+        yBottomPx: yBot,
+        width,
+        height
+      })
+    }
+  }
+
+  fs.writeFileSync(path.join(outDir, '_meta.json'), JSON.stringify({
+    version: 2,
+    method: 'ai-vision',
+    splitAt: new Date().toISOString(),
+    sourceStrips: stripPaths.length,
+    totalPanels: panelPaths.length,
+    bboxes: allBboxes
+  }, null, 2))
+
+  return { panelPaths, panelCount: panelPaths.length, sourceStrips: stripPaths.length, method: 'ai-vision' }
+}
+
 module.exports = {
   splitChapterPanels,
+  splitChapterPanelsAI,
+  detectPanelsViaAI,
   vstackImages,
   readRowBrightness,
   findPanelBoundariesFromRows,

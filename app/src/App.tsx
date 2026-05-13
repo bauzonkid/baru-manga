@@ -58,7 +58,7 @@ interface Api {
     registerReferer: (pageUrls: string[], referer: string) => Promise<IpcResult<{ hosts: string[]; referer: string }> | { ok: false }>
     download: (opts: { pageUrls: string[]; referer?: string; mangaSlug: string; chapterSlug: string; workspaceId?: string }) => Promise<IpcResult<{ dir: string; localPaths: string[] }>>
     readLocalAsBase64: (paths: string[]) => Promise<IpcResult<{ base64: string; mimeType: string }[]>>
-    splitPanels: (workspaceId: string, chapterSlug: string, opts?: { whiteThreshold?: number; minGapPx?: number; minPanelPx?: number }) => Promise<IpcResult<{ panelPaths: string[]; panelCount: number; sourceStrips: number; panelsDir: string }>>
+    splitPanels: (workspaceId: string, chapterSlug: string, opts?: { whiteThreshold?: number; minGapPx?: number; minPanelPx?: number }, mode?: 'ai' | 'cv') => Promise<IpcResult<{ panelPaths: string[]; panelCount: number; sourceStrips: number; panelsDir: string; mode: 'ai' | 'cv' }>>
     onSplitProgress: (cb: (info: { phase: string; msg?: string; i?: number; total?: number }) => void) => () => void
     openDownloadsFolder: (opts?: { workspaceId?: string; mangaSlug?: string }) => Promise<IpcResult<{ dir: string }>>
     onDownloadProgress: (cb: (info: { i: number; total: number; file: string; cached: boolean }) => void) => () => void
