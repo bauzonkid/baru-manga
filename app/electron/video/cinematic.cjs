@@ -255,6 +255,8 @@ async function renderSegmentClip(opts) {
     outPath
   ]
 
+  console.log(`[renderSegmentClip] ${panelPaths.length} panels, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, frames/panel ${frames}, out: ${path.basename(outPath)}`)
+
   return new Promise((resolve, reject) => {
     const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
     let stderr = ''

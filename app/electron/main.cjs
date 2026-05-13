@@ -1300,6 +1300,10 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
         const r = ttsResults[i]
         const panels = []
         for (let p = r.panelStart; p <= r.panelEnd; p++) panels.push(localPaths[p])
+        console.log(`[renderBatch] segment ${i}: panels [${r.panelStart}..${r.panelEnd}] = ${panels.length} ảnh, text="${(r.text || '').slice(0, 60)}..."`)
+        if (panels.length === 0) {
+          console.warn(`[renderBatch] segment ${i} has 0 panels! Range invalid (start=${r.panelStart}, end=${r.panelEnd}, localPaths length=${localPaths.length})`)
+        }
         const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
         await cinematic.renderSegmentClip({
           panelPaths: panels,
