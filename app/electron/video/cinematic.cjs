@@ -165,32 +165,36 @@ async function renderSegmentClip(opts) {
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
-  // Build inputs: each panel as image2 with -loop 1 -t <perPanelDur>.
-  // Audio as a final input (-i audioPath, no loop).
+  // Build inputs: each panel as a SINGLE-FRAME image (`-framerate 1 -t 1`)
+  // because zoompan multiplies output per input frame (d frames per input).
+  // With the old `-loop 1 -t perPanelDur` pattern, ffmpeg's default 25 fps
+  // input meant 25*T frames entered zoompan and each produced d=30T output
+  // frames → fg clip became ~25*T seconds instead of T, audio cut early,
+  // user only saw panel 0 for the whole segment.
   const inputs = []
   for (const p of panelPaths) {
-    inputs.push('-loop', '1', '-t', String(perPanelDur), '-i', p)
+    inputs.push('-loop', '1', '-framerate', '1', '-t', '1', '-i', p)
   }
   inputs.push('-i', audioPath)
 
-  // Per-panel filter graph:
-  //   [Ni]
-  //     split [bgN][fgN];
-  //   [bgN] scale=W:H:force_original_aspect_ratio=increase, crop=W:H, boxblur=20:5,
-  //         setsar=1 [bgN_blur];
-  //   [fgN] scale=zp:-1, zoompan=z='1+0.3*on/frames':d=frames:s=WxH, setsar=1 [fgN_zoom];
-  //   [bgN_blur][fgN_zoom] overlay=(W-w)/2:(H-h)/2 [vN]
-  // Then concat: [v0][v1]...[vN] concat=n=N:v=1:a=0 [v]
-  // Then optionally drawtext on [v] for caption.
+  // Per-panel filter graph (single-input variant):
+  //   [Ni] split [bgN][fgN];
+  //   [bgN] scale,crop,boxblur,setsar,loop(frames-1):size=1,fps=fps [bgNb]
+  //         → tile single bg frame for perPanelDur seconds
+  //   [fgN] scale,zoompan(d=frames,fps=fps) [fgNz]
+  //         → zoompan emits exactly d=frames out for the 1 input frame
+  //   [bgNb][fgNz] overlay [vN]
+  // Both bgNb and fgNz are now exactly perPanelDur long; overlay duration
+  // matches; concat sums cleanly.
+  const loopRepeat = Math.max(0, frames - 1)
   const parts = []
   const tags = []
   for (let i = 0; i < panelPaths.length; i++) {
     parts.push(
       `[${i}:v]split[bg${i}][fg${i}]`,
-      `[bg${i}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1[bg${i}b]`,
-      // Pre-scale foreground large so zoompan doesn't blur it. Keep aspect.
+      `[bg${i}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1,loop=loop=${loopRepeat}:size=1,fps=${fps}[bg${i}b]`,
       `[fg${i}]scale=${zpInner}:-1:force_original_aspect_ratio=decrease,zoompan=z='min(1+0.3*on/${frames},1.3)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1[fg${i}z]`,
-      `[bg${i}b][fg${i}z]overlay=(W-w)/2:(H-h)/2,fps=${fps},format=yuv420p[v${i}]`
+      `[bg${i}b][fg${i}z]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v${i}]`
     )
     tags.push(`[v${i}]`)
   }
