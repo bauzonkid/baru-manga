@@ -1226,6 +1226,28 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           {/* SECTION 4: Voiceover per-chapter (was 3 before adding Download step) */}
           {activeStep === 4 && ws && selectedList.length > 0 && (
             <Section number={4} title="Voiceover script">
+              {/* Style picker — controls AI narrator persona for THIS section's gen */}
+              <div
+                className="mb-4 p-3 rounded-md flex items-center gap-3 flex-wrap"
+                style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+              >
+                <span className="text-[11px] uppercase tracking-wider text-zinc-500 shrink-0">Phong cách script</span>
+                <select
+                  value={(['recap','critic','funny','serious'].includes(ws.defaults.style || '') ? ws.defaults.style : 'recap')}
+                  onChange={e => updateDefault({ style: e.target.value })}
+                  className="px-2.5 py-1.5 text-sm rounded-md outline-none flex-1 min-w-[260px]"
+                  style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                >
+                  <option value="recap">Recap kịch tính — HBO documentary narrator</option>
+                  <option value="critic">Critic chấm điểm — phê phán + điểm /10 giữa script</option>
+                  <option value="funny">Hài hước — witty, jab tropes</option>
+                  <option value="serious">Nghiêm túc — straight news report</option>
+                </select>
+                <span className="text-[10px] text-zinc-600 shrink-0">
+                  Đổi style → bấm ↻ regen chapter để áp dụng
+                </span>
+              </div>
+
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs text-zinc-500">
                   {segments.size} / {selectedList.length} chapter đã có script
@@ -1427,23 +1449,6 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                     </select>
                   </label>
 
-                  <label className="flex flex-col gap-1 col-span-2">
-                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">Phong cách script</span>
-                    <select
-                      value={(['recap','critic','funny','serious'].includes(ws.defaults.style || '') ? ws.defaults.style : 'recap')}
-                      onChange={e => updateDefault({ style: e.target.value })}
-                      className="px-2.5 py-2 text-sm rounded-md outline-none"
-                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                    >
-                      <option value="recap">Recap kịch tính — HBO documentary narrator</option>
-                      <option value="critic">Critic chấm điểm — phê phán + điểm /10 giữa script</option>
-                      <option value="funny">Hài hước — witty, jab tropes</option>
-                      <option value="serious">Nghiêm túc — straight news report</option>
-                    </select>
-                    <span className="text-[10px] text-zinc-600 mt-0.5">
-                      Đổi style → re-gen Step 4 để áp dụng cho voiceover mới
-                    </span>
-                  </label>
                 </div>
               )}
               <StepNextBar
