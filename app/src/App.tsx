@@ -73,6 +73,7 @@ interface Api {
       language: string
       mangaTitle?: string
       chapterTitle?: string
+      style?: 'recap' | 'critic' | 'funny' | 'serious'
     }) => Promise<IpcResult<{
       segments: VoiceoverSegment[]
       model: string

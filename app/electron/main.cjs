@@ -533,12 +533,41 @@ async function callRouter(model, body) {
 // where each segment owns a contiguous panel range. Used by M4 to render
 // cinematic video: zoom/pan over the segment's panels while the segment's
 // audio plays, then advance.
-function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels) {
+//
+// `style` switches narrator persona:
+//   recap   (default) — HBO documentary / movie trailer narrator. Plot focus.
+//   critic            — opinionated reviewer, drops a /10 score mid-script.
+//   funny             — playful, witty, light jabs at tropes.
+//   serious           — straight news report tone, minimal embellishment.
+function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style) {
   const langName = { vi: 'Vietnamese', th: 'Thai', en: 'English', ko: 'Korean', ja: 'Japanese' }[language] || 'English'
   const ctx = []
   if (mangaTitle) ctx.push(`Manga: ${mangaTitle}`)
   if (chapterTitle) ctx.push(`Chapter: ${chapterTitle}`)
   const ctxLine = ctx.length ? ctx.join(' • ') + '\n\n' : ''
+
+  // Style-specific narrator persona block — slots into the prompt where
+  // "Voice style:" used to be hardcoded.
+  const personaByStyle = {
+    recap: `Voice style: HBO documentary / movie trailer narrator. Vivid verbs, dramatic but not over-the-top.
+- Use character names from dialogue/visuals when visible. Avoid "the man / the woman".
+- Sprinkle 1 impactful direct quote (in ${langName}) across the whole script.
+- Don't invent plot — describe what's actually shown.`,
+    critic: `Voice style: opinionated manga critic with taste. You're not summarizing, you're REVIEWING.
+- Mix narration ("X confronts Y") with judgment ("a beat the writer earns" / "a contrivance the panel layout can't sell").
+- Drop your overall score as "X/10" inside ONE segment around the middle of the script (not the first or last segment).
+- Use character names from dialogue/visuals. Be specific about what works and what doesn't.
+- 1 direct quote (in ${langName}) somewhere in the script.`,
+    funny: `Voice style: witty stand-up commentator. Light jabs at tropes, dry observations, occasional self-aware aside.
+- Stay grounded in what's actually shown — humor comes from how you frame it, not from inventing gags.
+- Use character names. Drop 1 quote (in ${langName}) and play off it.
+- No corny puns. No "wow, much wow" memes.`,
+    serious: `Voice style: straight news report. Minimal embellishment, no dramatic flair.
+- Describe events factually in chronological order. Like a wire-service summary.
+- Use character names. 1 direct quote (in ${langName}) is allowed but not required.
+- Short, declarative sentences. Avoid metaphors and rhetorical flourishes.`
+  }
+  const persona = personaByStyle[style] || personaByStyle.recap
 
   return `${ctxLine}You are a manga recap narrator. Watch the ${totalPanels} chapter pages (provided as images in order) and produce a structured voiceover script in ${langName}.
 
@@ -553,16 +582,13 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 Rules:
 - 5 to 15 segments total. Each segment maps to a CONTIGUOUS range of panels (no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}).
 - Each segment's text is 1-3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that panel range.
-- Voice style: HBO documentary / movie trailer narrator. Vivid verbs, dramatic but not over-the-top.
-- Use character names from dialogue/visuals when visible. Avoid "the man / the woman".
-- Sprinkle 1 impactful direct quote (in ${langName}) across the whole script.
-- Don't invent plot — describe what's actually shown.
+- ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
 
 Return ONLY the JSON object.`
 }
 
-ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, mangaTitle, chapterTitle }) => {
+ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, mangaTitle, chapterTitle, style }) => {
   if (!Array.isArray(images) || images.length === 0) {
     return { ok: false, error: 'Không có ảnh để gen script' }
   }
@@ -573,7 +599,7 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
   // Hard cap at 100 to keep request size reasonable.
   const usePages = images.length > 100 ? sampleEvenly(images, 100) : images
   const declaredPanels = usePages.length
-  const content = [{ type: 'text', text: voiceoverPrompt(language, mangaTitle, chapterTitle, declaredPanels) }]
+  const content = [{ type: 'text', text: voiceoverPrompt(language, mangaTitle, chapterTitle, declaredPanels, style) }]
   for (const img of usePages) {
     const mt = /^image\/(jpe?g|png|webp|gif|bmp|avif)$/i.test(img.mimeType || '') ? img.mimeType : 'image/jpeg'
     content.push({ type: 'image_url', image_url: { url: `data:${mt};base64,${img.base64}` } })

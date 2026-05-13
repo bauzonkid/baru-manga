@@ -528,7 +528,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         images,
         language: ws.defaults.language,
         mangaTitle: ws.title,
-        chapterTitle: `Chapter ${ch.number}${ch.title ? ' — ' + ch.title : ''}`
+        chapterTitle: `Chapter ${ch.number}${ch.title ? ' — ' + ch.title : ''}`,
+        style: (ws.defaults.style as 'recap' | 'critic' | 'funny' | 'serious') || 'recap'
       })
       if (!aiRes.ok) throw new Error(aiRes.error)
 
@@ -1411,15 +1412,21 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   </label>
 
                   <label className="flex flex-col gap-1 col-span-2">
-                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">Style hint (optional)</span>
-                    <input
-                      type="text"
-                      placeholder="VD: kể chuyện hài hước, tone nghiêm túc, giọng trầm..."
-                      value={ws.defaults.style || ''}
+                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">Phong cách script</span>
+                    <select
+                      value={(['recap','critic','funny','serious'].includes(ws.defaults.style || '') ? ws.defaults.style : 'recap')}
                       onChange={e => updateDefault({ style: e.target.value })}
                       className="px-2.5 py-2 text-sm rounded-md outline-none"
                       style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                    />
+                    >
+                      <option value="recap">Recap kịch tính — HBO documentary narrator</option>
+                      <option value="critic">Critic chấm điểm — phê phán + điểm /10 giữa script</option>
+                      <option value="funny">Hài hước — witty, jab tropes</option>
+                      <option value="serious">Nghiêm túc — straight news report</option>
+                    </select>
+                    <span className="text-[10px] text-zinc-600 mt-0.5">
+                      Đổi style → re-gen Step 4 để áp dụng cho voiceover mới
+                    </span>
                   </label>
                 </div>
               )}
