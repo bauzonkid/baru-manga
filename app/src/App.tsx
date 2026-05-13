@@ -49,8 +49,8 @@ interface Api {
   }
   chapter: {
     registerReferer: (pageUrls: string[], referer: string) => Promise<IpcResult<{ hosts: string[]; referer: string }> | { ok: false }>
-    download: (opts: { pageUrls: string[]; referer?: string; mangaSlug: string; chapterSlug: string }) => Promise<IpcResult<{ dir: string; localPaths: string[] }>>
-    openDownloadsFolder: (mangaSlug: string) => Promise<IpcResult<{ dir: string }>>
+    download: (opts: { pageUrls: string[]; referer?: string; mangaSlug: string; chapterSlug: string; workspaceId?: string }) => Promise<IpcResult<{ dir: string; localPaths: string[] }>>
+    openDownloadsFolder: (opts?: { workspaceId?: string; mangaSlug?: string }) => Promise<IpcResult<{ dir: string }>>
     onDownloadProgress: (cb: (info: { i: number; total: number; file: string; cached: boolean }) => void) => () => void
   }
   tts: {
@@ -104,6 +104,7 @@ interface Api {
       model: string
       language: string
       mangaSlug: string
+      workspaceId?: string
     }) => Promise<IpcResult<{
       outPath: string
       chapters: number

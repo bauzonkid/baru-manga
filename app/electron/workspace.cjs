@@ -38,6 +38,29 @@ function storePath(userData) {
   return path.join(userData, 'workspaces.json')
 }
 
+/**
+ * Per-workspace folder. Everything for ONE manga lives here:
+ *   <userData>/workspaces/<id>/
+ *     ├ pages/<chapter-slug>/page_NNN.jpg     downloaded raw panels
+ *     ├ tts/<hash>.wav                        TTS cache, content-hashed
+ *     ├ clips/<chapter-slug>/seg_NNN.mp4      ffmpeg per-segment chunks
+ *     ├ videos/<stamp>.mp4                    final concatenated render
+ *     └ voiceover/<chapter-slug>.json         saved voiceover script (future)
+ *
+ * Delete the workspace folder → all derived data for that manga is gone.
+ */
+function workspaceDir(userData, id) {
+  return path.join(userData, 'workspaces', id)
+}
+
+function ensureWorkspaceLayout(userData, id) {
+  const root = workspaceDir(userData, id)
+  for (const sub of ['pages', 'tts', 'clips', 'videos', 'voiceover']) {
+    fs.mkdirSync(path.join(root, sub), { recursive: true })
+  }
+  return root
+}
+
 function loadAll(userData) {
   try {
     const data = JSON.parse(fs.readFileSync(storePath(userData), 'utf-8'))
@@ -89,6 +112,7 @@ function create(userData, input) {
   }
   items.push(ws)
   saveAll(userData, items)
+  ensureWorkspaceLayout(userData, ws.id)
   return ws
 }
 
@@ -106,6 +130,10 @@ function remove(userData, id) {
   const next = items.filter(w => w.id !== id)
   if (next.length === items.length) throw new Error('workspace_not_found')
   saveAll(userData, next)
+  // Nuke the workspace folder — pages, tts cache, clips, final MP4s. User
+  // can recover from source URL by recreating the workspace; the derived
+  // data is replaceable.
+  try { fs.rmSync(workspaceDir(userData, id), { recursive: true, force: true }) } catch {}
   return { removed: true }
 }
 
@@ -149,5 +177,7 @@ module.exports = {
   update,
   remove,
   upsertChapter,
-  removeChapter
+  removeChapter,
+  workspaceDir,
+  ensureWorkspaceLayout
 }

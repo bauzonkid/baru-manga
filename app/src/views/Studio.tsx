@@ -376,7 +376,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         pageUrls: filtered.map(p => p.url),
         referer: ws.source?.url,
         mangaSlug: slugify(ws.title),
-        chapterSlug: `ch${ch.number}`
+        chapterSlug: `ch${ch.number}`,
+        workspaceId: ws.id
       })
       if (!dl.ok) throw new Error(dl.error)
       setLocalPaths(prev => new Map(prev).set(chId, dl.data.localPaths))
@@ -592,7 +593,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         voice: ws.defaults.voice,
         model: ws.defaults.model,
         language: ws.defaults.language,
-        mangaSlug: slugify(ws.title)
+        mangaSlug: slugify(ws.title),
+        workspaceId: ws.id
       })
       if (!r.ok) throw new Error(r.error)
       setRenderOutput({ outPath: r.data.outPath, bytes: r.data.bytes })
@@ -981,10 +983,10 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 <p className="text-xs text-zinc-500 flex-1 truncate">
                   {selectedList.filter(c => (localPaths.get(c.id)?.length ?? 0) > 0).length} / {selectedList.length} chapter đã tải
                   <span className="ml-2 text-zinc-600">·</span>
-                  <span className="ml-2 font-mono text-[10px]">%APPDATA%\Baru-Manga\downloads\{slugify(ws.title)}\</span>
+                  <span className="ml-2 font-mono text-[10px]">%APPDATA%\Baru-Manga\workspaces\{ws.id.slice(0, 8)}…\pages\</span>
                 </p>
                 <button
-                  onClick={() => window.api?.chapter?.openDownloadsFolder?.(slugify(ws.title))}
+                  onClick={() => window.api?.chapter?.openDownloadsFolder?.({ workspaceId: ws.id })}
                   className="text-xs px-2.5 py-1.5 rounded-md text-zinc-300 hover:text-white shrink-0"
                   style={{ borderColor: '#27272a', borderWidth: '1px' }}
                   title="Mở folder workspace trong File Explorer"

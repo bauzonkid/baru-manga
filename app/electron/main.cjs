@@ -269,12 +269,19 @@ async function downloadPagesToDisk({ pageUrls, referer, dir, onProgress }) {
   return localPaths
 }
 
-// Open the downloads folder for a manga in the OS file explorer. Lets the
-// user inspect the actual JPGs that voiceover + render will read from.
-ipcMain.handle('chapter:openDownloadsFolder', async (_e, { mangaSlug }) => {
+// Open the workspace folder (or legacy downloads folder) in OS file explorer.
+// Accepts either { workspaceId } (preferred, opens whole workspace folder)
+// or { mangaSlug } (legacy fallback, opens downloads/<mSlug>/).
+ipcMain.handle('chapter:openDownloadsFolder', async (_e, { workspaceId, mangaSlug }) => {
   try {
-    const dir = path.join(app.getPath('userData'), 'downloads', safeSlug(mangaSlug || 'untitled-manga'))
-    fs.mkdirSync(dir, { recursive: true })
+    let dir
+    if (workspaceId) {
+      dir = workspace.workspaceDir(app.getPath('userData'), workspaceId)
+      workspace.ensureWorkspaceLayout(app.getPath('userData'), workspaceId)
+    } else {
+      dir = path.join(app.getPath('userData'), 'downloads', safeSlug(mangaSlug || 'untitled-manga'))
+      fs.mkdirSync(dir, { recursive: true })
+    }
     const err = await shell.openPath(dir)
     if (err) return { ok: false, error: err }
     return { ok: true, data: { dir } }
@@ -283,15 +290,23 @@ ipcMain.handle('chapter:openDownloadsFolder', async (_e, { mangaSlug }) => {
   }
 })
 
-ipcMain.handle('chapter:download', async (evt, { pageUrls, referer, mangaSlug, chapterSlug }) => {
+// Download chapter pages. With `workspaceId`, files land inside the workspace
+// folder (everything for one manga in one place). Without, legacy path under
+// downloads/<mSlug>/<cSlug>/ — kept for backward compat.
+ipcMain.handle('chapter:download', async (evt, { pageUrls, referer, mangaSlug, chapterSlug, workspaceId }) => {
   if (!Array.isArray(pageUrls) || pageUrls.length === 0) {
     return { ok: false, error: 'Không có URL ảnh để tải' }
   }
   try {
-    const base = path.join(app.getPath('userData'), 'downloads')
-    const mSlug = safeSlug(mangaSlug || 'untitled-manga')
     const cSlug = safeSlug(chapterSlug || 'untitled-chapter')
-    const dir = path.join(base, mSlug, cSlug)
+    let dir
+    if (workspaceId) {
+      dir = path.join(workspace.workspaceDir(app.getPath('userData'), workspaceId), 'pages', cSlug)
+    } else {
+      const base = path.join(app.getPath('userData'), 'downloads')
+      const mSlug = safeSlug(mangaSlug || 'untitled-manga')
+      dir = path.join(base, mSlug, cSlug)
+    }
     const localPaths = await downloadPagesToDisk({
       pageUrls, referer, dir,
       onProgress: info => evt.sender.send('chapter:download:progress', info)
@@ -1035,7 +1050,8 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
     voice,
     model,
     language,
-    mangaSlug
+    mangaSlug,
+    workspaceId
   } = opts || {}
 
   if (!Array.isArray(chapters) || chapters.length === 0) {
@@ -1057,8 +1073,21 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
   const lang = (language || 'en-US').trim()
 
   const userData = app.getPath('userData')
-  const cacheBaseDir = path.join(userData, 'video-cache')
-  const videosDir = path.join(userData, 'videos')
+  // Per-workspace layout (preferred) — all derived artifacts land inside the
+  // workspace folder. Without workspaceId, fall back to legacy global dirs.
+  let cacheBaseDir, videosDir, perChapterDownloadsRoot, perChapterClipsRoot
+  if (workspaceId) {
+    const wsRoot = workspace.ensureWorkspaceLayout(userData, workspaceId)
+    cacheBaseDir = path.join(wsRoot, 'tts')   // TTS cache scoped to this manga
+    videosDir = path.join(wsRoot, 'videos')
+    perChapterDownloadsRoot = path.join(wsRoot, 'pages')
+    perChapterClipsRoot = path.join(wsRoot, 'clips')
+  } else {
+    cacheBaseDir = path.join(userData, 'video-cache')
+    videosDir = path.join(userData, 'videos')
+    perChapterDownloadsRoot = path.join(userData, 'downloads', mSlug)
+    perChapterClipsRoot = path.join(cacheBaseDir, 'clips')
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const finalOut = path.join(videosDir, `${mSlug}__multi${chapters.length}__${vSlug}__${stamp}.mp4`)
 
@@ -1073,8 +1102,10 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
     for (let chapterIdx = 0; chapterIdx < chapters.length; chapterIdx++) {
       const ch = chapters[chapterIdx]
       const cSlug = safeSlug(ch.chapterSlug || `chapter${chapterIdx + 1}`)
-      const downloadsDir = path.join(userData, 'downloads', mSlug, cSlug)
-      const clipsDir = path.join(cacheBaseDir, 'clips', `${mSlug}__${cSlug}`)
+      const downloadsDir = path.join(perChapterDownloadsRoot, cSlug)
+      const clipsDir = workspaceId
+        ? path.join(perChapterClipsRoot, cSlug)
+        : path.join(perChapterClipsRoot, `${mSlug}__${cSlug}`)
       fs.mkdirSync(clipsDir, { recursive: true })
 
       const chIdxOut = chapterIdx + 1
