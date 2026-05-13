@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('api', {
     delete: id => ipcRenderer.invoke('workspace:delete', { id }),
     upsertChapter: (workspaceId, chapter) => ipcRenderer.invoke('workspace:upsertChapter', { workspaceId, chapter }),
     removeChapter: (workspaceId, chapterId) => ipcRenderer.invoke('workspace:removeChapter', { workspaceId, chapterId }),
-    scanPages: (workspaceId, chapters) => ipcRenderer.invoke('workspace:scanPages', { workspaceId, chapters })
+    scanPages: (workspaceId, chapters) => ipcRenderer.invoke('workspace:scanPages', { workspaceId, chapters }),
+    saveSegments: (workspaceId, chapterSlug, segments) => ipcRenderer.invoke('workspace:saveSegments', { workspaceId, chapterSlug, segments }),
+    loadSegments: (workspaceId, chapters) => ipcRenderer.invoke('workspace:loadSegments', { workspaceId, chapters })
   }
 })

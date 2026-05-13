@@ -15,7 +15,7 @@
  * Resume: paste lại URL cũ → em detect workspace tồn tại → load state cũ.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Chapter, Page } from '../types/plugin'
 import type { VoiceoverSegment } from '../App'
 
@@ -145,21 +145,42 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     })
   }, [])
 
-  // Sync localPaths from disk whenever the workspace changes. Files persist
-  // across app restarts but the React state Map doesn't — without this scan
-  // the user would need to re-download even though the JPGs are already on
-  // disk.
+  // Sync localPaths + segments from disk whenever the workspace changes.
+  // Files persist across app restarts but React state doesn't — without
+  // these scans the user would need to re-download pages and re-gen
+  // voiceover even though both are on disk.
   useEffect(() => {
     if (!ws || !window.api?.workspace) return
     let mounted = true
-    window.api.workspace.scanPages(ws.id, ws.chapters.map(c => ({ id: c.id, number: c.number }))).then(r => {
+    const chapterRefs = ws.chapters.map(c => ({ id: c.id, number: c.number }))
+    window.api.workspace.scanPages(ws.id, chapterRefs).then(r => {
       if (!mounted) return
-      if (r.ok) {
-        setLocalPaths(new Map(Object.entries(r.data)))
-      }
+      if (r.ok) setLocalPaths(new Map(Object.entries(r.data)))
+    })
+    window.api.workspace.loadSegments(ws.id, chapterRefs).then(r => {
+      if (!mounted) return
+      if (r.ok) setSegments(new Map(Object.entries(r.data)))
     })
     return () => { mounted = false }
   }, [ws?.id])
+
+  // Debounced auto-save per chapter — fires 1.5s after the last edit.
+  const saveTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const persistSegments = (chId: string, segs: VoiceoverSegment[]) => {
+    if (!ws || !window.api?.workspace) return
+    const ch = ws.chapters.find(c => c.id === chId)
+    if (!ch) return
+    const slug = `ch${ch.number}`
+    const existing = saveTimeouts.current.get(chId)
+    if (existing) clearTimeout(existing)
+    const handle = setTimeout(() => {
+      window.api!.workspace.saveSegments(ws.id, slug, segs).catch(e =>
+        console.warn('[persist] saveSegments failed', e)
+      )
+      saveTimeouts.current.delete(chId)
+    }, 1500)
+    saveTimeouts.current.set(chId, handle)
+  }
 
   // Subscribe to render progress
   useEffect(() => {
@@ -576,10 +597,11 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         throw new Error('AI trả về 0 segment — kiểm tra console DevTools để xem chi tiết')
       }
 
-      // 5. Save segments
+      // 5. Save segments — both in React state AND to disk (workspace/voiceover)
       console.log('[Voiceover] storing', aiRes.data.segments.length, 'segments for', chId)
       setSegments(prev => new Map(prev).set(chId, aiRes.data.segments))
       setExpandedChapter(chId)
+      persistSegments(chId, aiRes.data.segments)
 
       // 6. Update workspace chapter status
       if (window.api?.workspace) {
@@ -606,8 +628,10 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     setSegments(prev => {
       const list = prev.get(chId)
       if (!list) return prev
+      const updated = list.map((s, i) => i === idx ? { ...s, ...patch } : s)
       const next = new Map(prev)
-      next.set(chId, list.map((s, i) => i === idx ? { ...s, ...patch } : s))
+      next.set(chId, updated)
+      persistSegments(chId, updated)
       return next
     })
   }
@@ -616,8 +640,10 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     setSegments(prev => {
       const list = prev.get(chId)
       if (!list) return prev
+      const updated = list.filter((_, i) => i !== idx)
       const next = new Map(prev)
-      next.set(chId, list.filter((_, i) => i !== idx))
+      next.set(chId, updated)
+      persistSegments(chId, updated)
       return next
     })
   }
@@ -626,12 +652,14 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     setSegments(prev => {
       const list = prev.get(chId) || []
       const last = list[list.length - 1]
-      const next = new Map(prev)
-      next.set(chId, [...list, {
+      const updated = [...list, {
         text: '',
         panelStart: last ? last.panelEnd + 1 : 1,
         panelEnd: last ? last.panelEnd + 2 : 2
-      }])
+      }]
+      const next = new Map(prev)
+      next.set(chId, updated)
+      persistSegments(chId, updated)
       return next
     })
   }

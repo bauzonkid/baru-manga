@@ -288,6 +288,50 @@ ipcMain.handle('chapter:openDownloadsFolder', async (_e, { workspaceId, mangaSlu
 // Download chapter pages. With `workspaceId`, files land inside the workspace
 // folder (everything for one manga in one place). Without, legacy path under
 // downloads/<mSlug>/<cSlug>/ — kept for backward compat.
+// Persist voiceover segments to disk so they survive app restart.
+// Path: <ws>/voiceover/<chapterSlug>.json
+ipcMain.handle('workspace:saveSegments', async (_e, { workspaceId, chapterSlug, segments }) => {
+  try {
+    if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
+    const dir = path.join(workspace.workspaceDir(app.getPath('userData'), workspaceId), 'voiceover')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, `${safeSlug(chapterSlug || 'chapter')}.json`)
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      chapterSlug,
+      savedAt: new Date().toISOString(),
+      segments: segments || []
+    }, null, 2))
+    return { ok: true, data: { path: file } }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// Load all saved voiceover JSON files for a workspace. Returns
+// { [chapterId]: segments[] } for chapters with a saved file.
+ipcMain.handle('workspace:loadSegments', async (_e, { workspaceId, chapters }) => {
+  try {
+    if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
+    const dir = path.join(workspace.workspaceDir(app.getPath('userData'), workspaceId), 'voiceover')
+    const result = {}
+    for (const ch of (chapters || [])) {
+      const slug = safeSlug(`ch${ch.number}`)
+      const file = path.join(dir, `${slug}.json`)
+      try {
+        const raw = fs.readFileSync(file, 'utf-8')
+        const json = JSON.parse(raw)
+        if (Array.isArray(json.segments) && json.segments.length > 0) {
+          result[ch.id] = json.segments
+        }
+      } catch { /* file missing or unreadable — skip */ }
+    }
+    return { ok: true, data: result }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 // Scan workspace pages/ folder for already-downloaded chapter files. Returns
 // { [chapterId]: localPaths[] } for chapters whose folder has files. Called
 // on workspace load so the UI knows what's already on disk after a restart —
