@@ -149,17 +149,40 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   // Files persist across app restarts but React state doesn't — without
   // these scans the user would need to re-download pages and re-gen
   // voiceover even though both are on disk.
+  //
+  // Also: auto-select chapters that have work done + auto-advance to
+  // the most-progressed step so the user lands where they left off
+  // instead of starting from Step 2 every time.
   useEffect(() => {
     if (!ws || !window.api?.workspace) return
     let mounted = true
     const chapterRefs = ws.chapters.map(c => ({ id: c.id, number: c.number }))
-    window.api.workspace.scanPages(ws.id, chapterRefs).then(r => {
+    Promise.all([
+      window.api.workspace.scanPages(ws.id, chapterRefs),
+      window.api.workspace.loadSegments(ws.id, chapterRefs)
+    ]).then(([pagesRes, segRes]) => {
       if (!mounted) return
-      if (r.ok) setLocalPaths(new Map(Object.entries(r.data)))
-    })
-    window.api.workspace.loadSegments(ws.id, chapterRefs).then(r => {
-      if (!mounted) return
-      if (r.ok) setSegments(new Map(Object.entries(r.data)))
+      const pathsMap = pagesRes.ok ? new Map(Object.entries(pagesRes.data)) : new Map<string, string[]>()
+      const segsMap = segRes.ok ? new Map(Object.entries(segRes.data)) : new Map<string, VoiceoverSegment[]>()
+      setLocalPaths(pathsMap)
+      setSegments(segsMap)
+
+      // Auto-select chapters with downloaded pages or saved segments —
+      // those are the ones the user was working on.
+      const completed = new Set<string>()
+      for (const [chId] of segsMap) completed.add(chId)
+      for (const [chId] of pathsMap) completed.add(chId)
+      if (completed.size > 0) setSelectedChapters(completed)
+
+      // Resume at the highest-progressed step. Skip auto-advance if user
+      // has already navigated past Step 2 (don't yank them back/forward
+      // mid-session).
+      setActiveStep(prev => {
+        if (prev !== 1 && prev !== 2) return prev
+        if (segsMap.size > 0) return 4         // has voiceover script
+        if (pathsMap.size > 0) return 3        // has downloaded pages
+        return prev                            // stay at 2 (chapter picker)
+      })
     })
     return () => { mounted = false }
   }, [ws?.id])
@@ -597,11 +620,21 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         throw new Error('AI trả về 0 segment — kiểm tra console DevTools để xem chi tiết')
       }
 
-      // 5. Save segments — both in React state AND to disk (workspace/voiceover)
+      // 5. Save segments — both in React state AND to disk (workspace/voiceover).
+      //    Use immediate save (not debounced persistSegments) because the
+      //    user often closes the app right after gen completes; debounce
+      //    delay was eating writes.
       console.log('[Voiceover] storing', aiRes.data.segments.length, 'segments for', chId)
       setSegments(prev => new Map(prev).set(chId, aiRes.data.segments))
       setExpandedChapter(chId)
-      persistSegments(chId, aiRes.data.segments)
+      if (window.api?.workspace) {
+        try {
+          await window.api.workspace.saveSegments(ws.id, `ch${ch.number}`, aiRes.data.segments)
+          console.log('[Voiceover] persisted segments to disk for', chId)
+        } catch (e) {
+          console.warn('[Voiceover] immediate save failed', e)
+        }
+      }
 
       // 6. Update workspace chapter status
       if (window.api?.workspace) {
