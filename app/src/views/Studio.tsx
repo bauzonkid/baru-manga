@@ -492,14 +492,14 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     try {
       // Prefer local files downloaded in Step 3 — much faster, no network.
       // Step 3 already applied the skip rule, so localPaths is the filtered
-      // set; panel indices from AI will line up 1:1 with what ffmpeg renders.
+      // set; panel indices from AI line up 1:1 with what ffmpeg renders.
+      // No frontend cap — backend caps at 100 + handles sampling internally.
       let images: { base64: string; mimeType: string }[] = []
       const localList = localPaths.get(chId)
 
       if (localList && localList.length > 0) {
-        setPhaseFor(chId, `Đọc ${Math.min(localList.length, 30)} ảnh local...`)
-        const capped = localList.slice(0, Math.min(localList.length, 30))
-        const r = await window.api.chapter.readLocalAsBase64(capped)
+        setPhaseFor(chId, `Đọc ${localList.length} ảnh local...`)
+        const r = await window.api.chapter.readLocalAsBase64(localList)
         if (!r.ok) throw new Error(r.error)
         images = r.data
       } else {
@@ -514,10 +514,9 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         const excluded = computeExcluded(chId, pgRes.data.length)
         const filteredPages = pgRes.data.filter((_, i) => !excluded.has(i))
         if (filteredPages.length === 0) throw new Error('Tất cả page đã bị bỏ — chừa lại ít nhất 1 ảnh')
-        const pagesToUse = filteredPages.slice(0, Math.min(filteredPages.length, 30))
-        for (let i = 0; i < pagesToUse.length; i++) {
-          setPhaseFor(chId, `Tải ảnh ${i + 1}/${pagesToUse.length}...`)
-          const img = await window.api.image.fetch(pagesToUse[i].url, ws.source?.url)
+        for (let i = 0; i < filteredPages.length; i++) {
+          setPhaseFor(chId, `Tải ảnh ${i + 1}/${filteredPages.length}...`)
+          const img = await window.api.image.fetch(filteredPages[i].url, ws.source?.url)
           if (img.ok) images.push({ base64: img.base64, mimeType: img.contentType })
         }
       }
