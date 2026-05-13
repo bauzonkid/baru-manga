@@ -977,14 +977,24 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           {/* SECTION 3: Download to workspace */}
           {activeStep === 3 && ws && selectedList.length > 0 && (
             <Section number={3} title="Tải ảnh về workspace">
-              <div className="flex items-center justify-between mb-4">
-                <p className="text-xs text-zinc-500">
+              <div className="flex items-center justify-between mb-4 gap-3">
+                <p className="text-xs text-zinc-500 flex-1 truncate">
                   {selectedList.filter(c => (localPaths.get(c.id)?.length ?? 0) > 0).length} / {selectedList.length} chapter đã tải
+                  <span className="ml-2 text-zinc-600">·</span>
+                  <span className="ml-2 font-mono text-[10px]">%APPDATA%\Baru-Manga\downloads\{slugify(ws.title)}\</span>
                 </p>
+                <button
+                  onClick={() => window.api?.chapter?.openDownloadsFolder?.(slugify(ws.title))}
+                  className="text-xs px-2.5 py-1.5 rounded-md text-zinc-300 hover:text-white shrink-0"
+                  style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                  title="Mở folder workspace trong File Explorer"
+                >
+                  📂 Folder
+                </button>
                 <button
                   onClick={downloadAllSelected}
                   disabled={downloadBusy.size > 0 || allSelectedDownloaded}
-                  className="px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors disabled:opacity-50"
+                  className="px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors disabled:opacity-50 shrink-0"
                   style={{ backgroundColor: '#f43f5e' }}
                 >
                   {downloadBusy.size > 0

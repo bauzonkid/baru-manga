@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
     registerReferer: (pageUrls, referer) =>
       ipcRenderer.invoke('chapter:registerReferer', { pageUrls, referer }),
     download: opts => ipcRenderer.invoke('chapter:download', opts),
+    openDownloadsFolder: mangaSlug => ipcRenderer.invoke('chapter:openDownloadsFolder', { mangaSlug }),
     onDownloadProgress: cb => {
       const handler = (_e, info) => cb(info)
       ipcRenderer.on('chapter:download:progress', handler)

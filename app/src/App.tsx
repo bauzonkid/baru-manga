@@ -50,6 +50,7 @@ interface Api {
   chapter: {
     registerReferer: (pageUrls: string[], referer: string) => Promise<IpcResult<{ hosts: string[]; referer: string }> | { ok: false }>
     download: (opts: { pageUrls: string[]; referer?: string; mangaSlug: string; chapterSlug: string }) => Promise<IpcResult<{ dir: string; localPaths: string[] }>>
+    openDownloadsFolder: (mangaSlug: string) => Promise<IpcResult<{ dir: string }>>
     onDownloadProgress: (cb: (info: { i: number; total: number; file: string; cached: boolean }) => void) => () => void
   }
   tts: {

@@ -269,6 +269,20 @@ async function downloadPagesToDisk({ pageUrls, referer, dir, onProgress }) {
   return localPaths
 }
 
+// Open the downloads folder for a manga in the OS file explorer. Lets the
+// user inspect the actual JPGs that voiceover + render will read from.
+ipcMain.handle('chapter:openDownloadsFolder', async (_e, { mangaSlug }) => {
+  try {
+    const dir = path.join(app.getPath('userData'), 'downloads', safeSlug(mangaSlug || 'untitled-manga'))
+    fs.mkdirSync(dir, { recursive: true })
+    const err = await shell.openPath(dir)
+    if (err) return { ok: false, error: err }
+    return { ok: true, data: { dir } }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 ipcMain.handle('chapter:download', async (evt, { pageUrls, referer, mangaSlug, chapterSlug }) => {
   if (!Array.isArray(pageUrls) || pageUrls.length === 0) {
     return { ok: false, error: 'Không có URL ảnh để tải' }
