@@ -135,22 +135,25 @@ async function renderSinglePanelClip({ panelPath, duration, fps, dims, outPath }
   if (!fs.existsSync(panelPath)) throw new Error(`Panel not found: ${panelPath}`)
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
-  // Filter graph (single-input zoompan recipe):
-  //   bg = scale+crop to fill canvas, then boxblur for "frosted glass" feel
-  //   fg = scale to FIT within canvas (decrease) so portrait manga panels
-  //        keep their natural aspect ratio; then a subtle zoompan
-  //        (1.0 → 1.08 over duration) for cinematic drift without bóp size
-  //   overlay center
+  // Filter graph:
+  //   bg = scale+crop to fill canvas, then boxblur for "frosted glass"
+  //        backdrop. Always 1920×1080.
+  //   fg = scale to FIT within canvas (decrease) keeping aspect. Portrait
+  //        manga panel (e.g. 1000×1500) becomes 720×1080 — full panel
+  //        visible, no crop.
+  //   overlay center → panel sits in middle, blurred bg fills the empty
+  //        horizontal margins (~600px each side for portrait).
   //
-  // Earlier version pre-scaled fg to 2×W (3840 wide) which made portrait
-  // 1000×1500 panels balloon to 3840×5760, then zoompan cropped down to
-  // 1920×1080 → user saw "phóng to quá, bị bóp 9:16 thành 16:9".
+  // zoompan was REMOVED here because it stretches input to fill its
+  // output canvas (s=WxH), turning a 720×1080 portrait into a 1920×1080
+  // landscape with distortion. User saw "phóng to quá, bóp 9:16 thành
+  // 16:9". Static overlay preserves the panel exactly. Cinematic drift
+  // can be added back later via separate filter if needed.
   const filterComplex = [
     `[0:v]split[bg][fg]`,
-    `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1[bgb]`,
-    `[fg]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1[fgs]`,
-    `[fgs]zoompan=z='min(1.0+0.08*on/${frames},1.08)':d=${frames}:s=${W}x${H}:fps=${fps}[fgz]`,
-    `[bgb][fgz]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]`
+    `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1,fps=${fps}[bgb]`,
+    `[fg]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,fps=${fps}[fgs]`,
+    `[bgb][fgs]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]`
   ].join(';')
 
   const args = [
