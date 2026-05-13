@@ -222,6 +222,13 @@ run_headless.py
 legacy-render-video.bat
 full-pipeline-demo.mp4
 comic-processor/
+comic_processor/
 comic_pages/
 voice_samples/
 output/
+tests/
+requirements.txt
+setup_indextts.sh
+.env.example
+panel_segmentation_documentation.*
+prompt_narrative*.txt
