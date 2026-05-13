@@ -132,8 +132,18 @@ async function renderSegmentClip(opts) {
     outPath,
     dims = { width: 1920, height: 1080 },
     fps = 30,
-    burnCaption = true
+    burnCaption = true,
+    subtitleStyle = {}
   } = opts
+
+  // Subtitle style with sensible defaults. Frontend can override per workspace.
+  const subFontSize = Number(subtitleStyle.fontSize) || 42
+  const subPosition = ['top', 'middle', 'bottom'].includes(subtitleStyle.position) ? subtitleStyle.position : 'bottom'
+  const subColor = subtitleStyle.color || 'white'
+  const subBoxOpacity = Number.isFinite(subtitleStyle.boxOpacity) ? subtitleStyle.boxOpacity : 0.65
+  const subShowBox = subtitleStyle.showBox !== false  // default true
+  const subYOffset = Number.isFinite(subtitleStyle.yOffset) ? subtitleStyle.yOffset : 80
+  const subMaxLineChars = Number(subtitleStyle.maxLineChars) || Math.max(28, Math.floor(1600 / (subFontSize / 1.5)))
 
   if (!Array.isArray(panelPaths) || panelPaths.length === 0) {
     throw new Error('renderSegmentClip: panelPaths empty')
@@ -200,13 +210,21 @@ async function renderSegmentClip(opts) {
       lastTag = 'vout'
     } else {
       const fontArg = escapeFontfilePath(fontFile)
-      const wrapped = wrapCaption(captionText.trim())
+      const wrapped = wrapCaption(captionText.trim(), subMaxLineChars)
       const escaped = escapeDrawtext(wrapped)
+      // y expression by position. top/middle/bottom relative to frame.
+      let yExpr
+      if (subPosition === 'top') yExpr = String(subYOffset)
+      else if (subPosition === 'middle') yExpr = `(h-text_h)/2`
+      else yExpr = `h-text_h-${subYOffset}`
+      const boxArg = subShowBox
+        ? `box=1:boxcolor=black@${subBoxOpacity}:boxborderw=24:`
+        : ''
       parts.push(
-        `[${lastTag}]drawtext=fontfile='${fontArg}':text='${escaped}':fontsize=42:fontcolor=white:` +
-        `box=1:boxcolor=black@0.65:boxborderw=24:` +
-        `line_spacing=10:` +
-        `x=(w-text_w)/2:y=h-text_h-80[vout]`
+        `[${lastTag}]drawtext=fontfile='${fontArg}':text='${escaped}':fontsize=${subFontSize}:fontcolor=${subColor}:` +
+        `${boxArg}` +
+        `line_spacing=10:shadowcolor=black@0.6:shadowx=2:shadowy=2:` +
+        `x=(w-text_w)/2:y=${yExpr}[vout]`
       )
       lastTag = 'vout'
     }

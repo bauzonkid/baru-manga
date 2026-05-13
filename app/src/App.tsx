@@ -107,6 +107,15 @@ interface Api {
       language: string
       mangaSlug: string
       workspaceId?: string
+      subtitleEnabled?: boolean
+      subtitleStyle?: {
+        fontSize?: number
+        position?: 'top' | 'middle' | 'bottom'
+        color?: string
+        boxOpacity?: number
+        showBox?: boolean
+        yOffset?: number
+      }
     }) => Promise<IpcResult<{
       outPath: string
       chapters: number

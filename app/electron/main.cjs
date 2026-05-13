@@ -1125,7 +1125,9 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
     model,
     language,
     mangaSlug,
-    workspaceId
+    workspaceId,
+    subtitleStyle,
+    subtitleEnabled
   } = opts || {}
 
   if (!Array.isArray(chapters) || chapters.length === 0) {
@@ -1236,7 +1238,9 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
           panelPaths: panels,
           audioPath: r.audioPath,
           captionText: r.text,
-          outPath: clipOut
+          outPath: clipOut,
+          burnCaption: subtitleEnabled !== false,
+          subtitleStyle: subtitleStyle || {}
         })
         allClips.push(clipOut)
         progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ttsResults.length })

@@ -29,7 +29,18 @@ interface WorkspaceData {
   cover: string | null
   source: { pluginId: string; mangaId: string; url?: string } | null
   chapters: ChapterEntry[]
-  defaults: { voice: string; model: string; language: string; style?: string }
+  defaults: {
+    voice: string
+    model: string
+    language: string
+    style?: string
+    subtitleEnabled?: boolean
+    subtitlePreset?: string
+    subtitleFontSize?: number
+    subtitlePosition?: 'top' | 'middle' | 'bottom'
+    subtitleBoxOpacity?: number
+    subtitleShowBox?: boolean
+  }
 }
 
 interface ChapterEntry {
@@ -672,6 +683,7 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
       }
 
       // Call batch render IPC (handles both 1 chapter and N chapters)
+      const wsAny = ws.defaults as any
       const r = await window.api.video.renderBatch({
         chapters: chaptersInput,
         referer: ws.source?.url,
@@ -679,7 +691,14 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         model: ws.defaults.model,
         language: ws.defaults.language,
         mangaSlug: slugify(ws.title),
-        workspaceId: ws.id
+        workspaceId: ws.id,
+        subtitleEnabled: wsAny.subtitleEnabled !== false,
+        subtitleStyle: {
+          fontSize: wsAny.subtitleFontSize,
+          position: wsAny.subtitlePosition,
+          boxOpacity: wsAny.subtitleBoxOpacity,
+          showBox: wsAny.subtitleShowBox
+        }
       })
       if (!r.ok) throw new Error(r.error)
       setRenderOutput({ outPath: r.data.outPath, bytes: r.data.bytes })
@@ -1479,9 +1498,9 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
             </Section>
           )}
 
-          {/* SECTION 5: Voice + style (was 4) */}
+          {/* SECTION 5: Voice + subtitle (was 4) */}
           {activeStep === 5 && ws && selectedList.length > 0 && (
-            <Section number={5} title="Giọng đọc">
+            <Section number={5} title="Giọng đọc + Phụ đề">
               {!voiceMeta ? (
                 <p className="text-sm text-zinc-500 italic">Đang tải danh sách voice...</p>
               ) : (
@@ -1531,9 +1550,145 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
 
                 </div>
               )}
+
+              {/* Subtitle config — burned-in caption khi render */}
+              <div className="mt-5 pt-4" style={{ borderTopColor: '#27272a', borderTopWidth: '1px' }}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[11px] uppercase tracking-wider text-zinc-500">Phụ đề (burn vào video)</span>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={ws.defaults.subtitleEnabled !== false}
+                      onChange={e => updateDefault({ subtitleEnabled: e.target.checked } as any)}
+                      className="accent-rose-500"
+                    />
+                    Bật phụ đề
+                  </label>
+                </div>
+
+                {ws.defaults.subtitleEnabled !== false && (
+                  <div className="space-y-3">
+                    {/* Preset */}
+                    <div className="grid grid-cols-4 gap-2">
+                      {([
+                        { id: 'tiktok',  label: 'TikTok',  size: 56, pos: 'bottom', opacity: 0.85, box: true,  desc: 'Big, bold, dark box' },
+                        { id: 'youtube', label: 'YouTube', size: 40, pos: 'bottom', opacity: 0.65, box: true,  desc: 'Standard caption' },
+                        { id: 'cinema',  label: 'Cinema',  size: 38, pos: 'bottom', opacity: 0,    box: false, desc: 'No box, shadow only' },
+                        { id: 'mini',    label: 'Mini',    size: 30, pos: 'bottom', opacity: 0.4,  box: true,  desc: 'Small, unobtrusive' }
+                      ] as const).map(p => {
+                        const isActive = (ws.defaults.subtitlePreset || 'tiktok') === p.id
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => updateDefault({
+                              subtitlePreset: p.id,
+                              subtitleFontSize: p.size,
+                              subtitlePosition: p.pos,
+                              subtitleBoxOpacity: p.opacity,
+                              subtitleShowBox: p.box
+                            } as any)}
+                            className="px-2 py-2 rounded-md text-left transition-colors"
+                            style={{
+                              backgroundColor: isActive ? 'rgba(244, 63, 94, 0.12)' : '#0a0a0b',
+                              borderColor: isActive ? 'rgba(244, 63, 94, 0.4)' : '#27272a',
+                              borderWidth: '1px'
+                            }}
+                          >
+                            <div className="text-xs font-medium text-zinc-100">{p.label}</div>
+                            <div className="text-[10px] text-zinc-500 mt-0.5">{p.desc}</div>
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    {/* Fine tune */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-600">Cỡ chữ</span>
+                        <input
+                          type="number"
+                          min={20}
+                          max={96}
+                          value={ws.defaults.subtitleFontSize || 42}
+                          onChange={e => updateDefault({ subtitleFontSize: Math.max(20, Math.min(96, Number(e.target.value) || 42)) } as any)}
+                          className="px-2 py-1.5 text-sm rounded outline-none text-center"
+                          style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-600">Vị trí</span>
+                        <select
+                          value={ws.defaults.subtitlePosition || 'bottom'}
+                          onChange={e => updateDefault({ subtitlePosition: e.target.value } as any)}
+                          className="px-2 py-1.5 text-sm rounded outline-none"
+                          style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                        >
+                          <option value="bottom">Dưới</option>
+                          <option value="middle">Giữa</option>
+                          <option value="top">Trên</option>
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-600">Nền chữ</span>
+                        <select
+                          value={ws.defaults.subtitleShowBox === false ? 'none' : String(ws.defaults.subtitleBoxOpacity ?? 0.65)}
+                          onChange={e => {
+                            const v = e.target.value
+                            if (v === 'none') {
+                              updateDefault({ subtitleShowBox: false } as any)
+                            } else {
+                              updateDefault({ subtitleShowBox: true, subtitleBoxOpacity: Number(v) } as any)
+                            }
+                          }}
+                          className="px-2 py-1.5 text-sm rounded outline-none"
+                          style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                        >
+                          <option value="0.85">Đặc (85%)</option>
+                          <option value="0.65">Vừa (65%)</option>
+                          <option value="0.4">Mờ (40%)</option>
+                          <option value="none">Không nền</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    {/* Preview */}
+                    <div
+                      className="rounded-md p-4 flex items-end justify-center"
+                      style={{
+                        background: 'linear-gradient(135deg, #1c1917, #292524)',
+                        height: 100,
+                        position: 'relative'
+                      }}
+                    >
+                      <div
+                        className="rounded"
+                        style={{
+                          fontSize: Math.max(10, (ws.defaults.subtitleFontSize || 42) / 4),
+                          color: 'white',
+                          padding: ws.defaults.subtitleShowBox === false ? '0' : '4px 10px',
+                          backgroundColor: ws.defaults.subtitleShowBox === false
+                            ? 'transparent'
+                            : `rgba(0,0,0,${ws.defaults.subtitleBoxOpacity ?? 0.65})`,
+                          textShadow: '1px 1px 2px rgba(0,0,0,0.6)',
+                          maxWidth: '80%',
+                          textAlign: 'center',
+                          alignSelf: ws.defaults.subtitlePosition === 'top'
+                            ? 'flex-start'
+                            : ws.defaults.subtitlePosition === 'middle'
+                            ? 'center'
+                            : 'flex-end'
+                        }}
+                      >
+                        Đại Lăng ngồi giữa rừng tre vắng lặng...
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <StepNextBar
                 disabled={false}
-                hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()}`}
+                hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()} · Sub: ${ws.defaults.subtitleEnabled === false ? 'OFF' : (ws.defaults.subtitlePreset || 'tiktok')}`}
                 label="Tiếp: Render"
                 onNext={() => setActiveStep(6)}
                 onBack={() => setActiveStep(4)}
