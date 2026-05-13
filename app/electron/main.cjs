@@ -615,6 +615,11 @@ Return ONLY the JSON object.`
 }
 
 ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, mangaTitle, chapterTitle, style }) => {
+  console.log('[ai:voiceoverScript] called', {
+    imageCount: Array.isArray(images) ? images.length : 0,
+    language, style, mangaTitle, chapterTitle,
+    routerBase: ROUTER_BASE
+  })
   if (!Array.isArray(images) || images.length === 0) {
     return { ok: false, error: 'Không có ảnh để gen script' }
   }
@@ -700,9 +705,11 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
       }
     } catch (e) {
       tried.push({ model: m, error: e.message })
+      console.error('[ai:voiceoverScript] model exception', { model: m, error: e.message })
     }
   }
-  return { ok: false, error: 'Tất cả models đều fail.', tried }
+  console.error('[ai:voiceoverScript] all models failed', { tried })
+  return { ok: false, error: `Tất cả ${tried.length} models đều fail. Last: ${tried[tried.length - 1]?.error || tried[tried.length - 1]?.status || 'unknown'}`, tried }
 })
 
 ipcMain.handle('ai:review', async (_e, { model, images, language, style, mangaTitle, chapterTitle, maxPages }) => {

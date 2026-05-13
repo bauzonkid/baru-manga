@@ -496,11 +496,16 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   }
 
   const generateForChapter = async (chId: string) => {
-    if (!ws || !window.api?.plugins || !window.api?.image || !window.api?.ai || !window.api?.chapter) return
-    if (genBusy.has(chId)) return
+    console.log('[Voiceover] generateForChapter called', { chId, wsId: ws?.id })
+    if (!ws) { console.warn('[Voiceover] aborted: no workspace'); return }
+    if (!window.api?.ai) { setErrorFor(chId, 'window.api.ai chưa expose — restart Electron'); return }
+    if (!window.api?.chapter) { setErrorFor(chId, 'window.api.chapter chưa expose — restart Electron'); return }
+    if (!window.api?.plugins) { setErrorFor(chId, 'window.api.plugins chưa expose — restart Electron'); return }
+    if (!window.api?.image) { setErrorFor(chId, 'window.api.image chưa expose — restart Electron'); return }
+    if (genBusy.has(chId)) { console.warn('[Voiceover] already busy', chId); return }
 
     const ch = ws.chapters.find(c => c.id === chId)
-    if (!ch) return
+    if (!ch) { setErrorFor(chId, `Không tìm thấy chapter ${chId}`); return }
 
     setGenBusy(prev => new Set(prev).add(chId))
     setErrorFor(chId, null)
@@ -539,7 +544,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
       if (images.length === 0) throw new Error('Không có ảnh nào để gen voiceover')
 
       // 4. Call AI
-      setPhaseFor(chId, 'Gen voiceover script...')
+      setPhaseFor(chId, `Gen voiceover (${images.length} ảnh)...`)
+      console.log('[Voiceover] calling AI', { imageCount: images.length, lang: ws.defaults.language, style: ws.defaults.style })
       const aiRes = await window.api.ai.voiceoverScript({
         images,
         language: ws.defaults.language,
@@ -547,9 +553,14 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         chapterTitle: `Chapter ${ch.number}${ch.title ? ' — ' + ch.title : ''}`,
         style: (ws.defaults.style as 'recap' | 'critic' | 'funny' | 'serious') || 'recap'
       })
-      if (!aiRes.ok) throw new Error(aiRes.error)
+      console.log('[Voiceover] AI response', aiRes)
+      if (!aiRes.ok) throw new Error(aiRes.error || 'AI không trả response')
+      if (!aiRes.data || !Array.isArray(aiRes.data.segments) || aiRes.data.segments.length === 0) {
+        throw new Error('AI trả về 0 segment — kiểm tra console DevTools để xem chi tiết')
+      }
 
       // 5. Save segments
+      console.log('[Voiceover] storing', aiRes.data.segments.length, 'segments for', chId)
       setSegments(prev => new Map(prev).set(chId, aiRes.data.segments))
       setExpandedChapter(chId)
 
@@ -1247,6 +1258,27 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   Đổi style → bấm ↻ regen chapter để áp dụng
                 </span>
               </div>
+
+              {/* Aggregate error banner — bubble up any chapter-level gen error */}
+              {genError.size > 0 && (
+                <div
+                  className="mb-3 p-3 rounded-md text-xs"
+                  style={{ backgroundColor: 'rgba(244, 63, 94, 0.12)', borderColor: 'rgba(244, 63, 94, 0.4)', borderWidth: '1px', color: '#fda4af' }}
+                >
+                  <div className="font-medium mb-1">Có lỗi khi gen voiceover:</div>
+                  {Array.from(genError.entries()).map(([chId, msg]) => {
+                    const ch = ws?.chapters.find(c => c.id === chId)
+                    return (
+                      <div key={chId} className="font-mono text-[11px] leading-relaxed break-words">
+                        Ch {ch?.number || chId}: {msg}
+                      </div>
+                    )
+                  })}
+                  <div className="text-[10px] text-rose-300/70 mt-2">
+                    Mở DevTools (Ctrl+Shift+I) → tab Console → tìm log "[Voiceover]" để xem chi tiết.
+                  </div>
+                </div>
+              )}
 
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs text-zinc-500">
