@@ -243,24 +243,19 @@ async function downloadPagesToDisk({ pageUrls, referer, dir, onProgress }) {
       }
     } catch { /* not present */ }
 
-    const buf = await new Promise((resolve, reject) => {
-      const req = net.request({ method: 'GET', url, redirect: 'follow' })
-      req.setHeader('User-Agent',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
-      if (referer) req.setHeader('Referer', referer)
-      const chunks = []
-      req.on('response', res => {
-        if (res.statusCode >= 400) {
-          reject(new Error(`Page ${i + 1} → HTTP ${res.statusCode}`))
-          return
-        }
-        res.on('data', c => chunks.push(c))
-        res.on('end', () => resolve(Buffer.concat(chunks)))
-        res.on('error', reject)
-      })
-      req.on('error', reject)
-      req.end()
+    // Node fetch — bypasses Chromium adblock that triggers ERR_BLOCKED_BY_CLIENT
+    // for CDN URLs containing keywords like "ad", "banner", "track".
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept': 'image/webp,image/avif,image/png,image/jpeg,image/*,*/*;q=0.8',
+        ...(referer ? { 'Referer': referer } : {})
+      }
     })
+    if (!res.ok) throw new Error(`Page ${i + 1} → HTTP ${res.status}`)
+    const buf = Buffer.from(await res.arrayBuffer())
 
     fs.writeFileSync(target, buf)
     localPaths.push(target)
@@ -382,42 +377,37 @@ function sniffMimeFromBuffer(buf) {
 }
 
 ipcMain.handle('image:fetch', async (_e, { url, referer }) => {
-  // Pick referer:
-  //   1. explicit `referer` from renderer (page URL that hosted the image)
-  //   2. fallback to the image URL's own origin
-  // Hardcoding mangadex.org broke every other site (e.g. nettruyen) because
-  // CDNs check the Referer header against their hotlink allowlist.
+  // Use Node fetch (Node 18+ global) instead of electron.net.request — net.request
+  // routes through Chromium's network stack which applies built-in adblock
+  // filters (URLs with "ad", "banner", "track" trigger ERR_BLOCKED_BY_CLIENT).
+  // Node fetch hits raw network with zero filtering.
   let ref = referer
   if (!ref) {
     try { ref = new URL(url).origin + '/' } catch { ref = '' }
   }
-  return new Promise((resolve, reject) => {
-    const req = net.request({ method: 'GET', url, redirect: 'follow' })
-    req.setHeader('User-Agent',
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
-    if (ref) req.setHeader('Referer', ref)
-    const chunks = []
-    req.on('response', res => {
-      res.on('data', c => chunks.push(c))
-      res.on('end', () => {
-        const buf = Buffer.concat(chunks)
-        // Electron's net headers can be string OR string[] depending on version.
-        // `?.[0]` on a string returns the first CHARACTER (e.g. "i" from "image/jpeg"),
-        // which made Gemini reject with: Unsupported MIME type: i
-        const ctRaw = res.headers['content-type'] || res.headers['Content-Type']
-        const ct = Array.isArray(ctRaw) ? ctRaw[0] : (typeof ctRaw === 'string' ? ctRaw : '')
-        const cleanCt = (ct.split(';')[0] || '').trim() || sniffMimeFromBuffer(buf) || 'image/jpeg'
-        resolve({
-          ok: true,
-          contentType: cleanCt,
-          base64: buf.toString('base64')
-        })
-      })
-      res.on('error', err => reject(err))
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept': 'image/webp,image/avif,image/png,image/jpeg,image/*,*/*;q=0.8',
+        'Accept-Language': 'vi,en;q=0.8',
+        ...(ref ? { 'Referer': ref } : {})
+      }
     })
-    req.on('error', err => reject(err))
-    req.end()
-  }).catch(err => ({ ok: false, error: err.message }))
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
+    const buf = Buffer.from(await res.arrayBuffer())
+    const ctRaw = res.headers.get('content-type') || ''
+    const cleanCt = (ctRaw.split(';')[0] || '').trim() || sniffMimeFromBuffer(buf) || 'image/jpeg'
+    return {
+      ok: true,
+      contentType: cleanCt,
+      base64: buf.toString('base64')
+    }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
 })
 
 // ----- AI Review via 9router (OpenAI-compatible) -----
