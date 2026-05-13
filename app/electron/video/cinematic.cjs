@@ -124,6 +124,52 @@ function wrapCaption(text, maxChars = 60) {
  * @param {boolean}  [opts.burnCaption=true]
  * @returns {Promise<{ path: string, duration: number, panels: number }>}
  */
+/**
+ * Render a single still image to a cinematic clip with blur background +
+ * zoom-pan foreground. Canonical ffmpeg recipe (single-input filter_complex)
+ * — proven reliable. Used as building block for multi-panel segments.
+ */
+async function renderSinglePanelClip({ panelPath, duration, fps, dims, outPath }) {
+  const { width: W, height: H } = dims
+  const frames = Math.max(1, Math.round(duration * fps))
+  const zpInner = W * 2
+  if (!fs.existsSync(panelPath)) throw new Error(`Panel not found: ${panelPath}`)
+  fs.mkdirSync(path.dirname(outPath), { recursive: true })
+
+  const filterComplex = [
+    `[0:v]split[bg][fg]`,
+    `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1[bgb]`,
+    `[fg]scale=${zpInner}:-1:force_original_aspect_ratio=decrease,zoompan=z='min(1+0.3*on/${frames},1.3)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1[fgz]`,
+    `[bgb][fgz]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]`
+  ].join(';')
+
+  const args = [
+    '-y',
+    '-loop', '1',
+    '-i', panelPath,
+    '-filter_complex', filterComplex,
+    '-map', '[v]',
+    '-r', String(fps),
+    '-t', String(duration),
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    '-crf', '20',
+    '-pix_fmt', 'yuv420p',
+    outPath
+  ]
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
+    let err = ''
+    proc.stderr.on('data', d => { err += d.toString() })
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`renderSinglePanelClip ${path.basename(panelPath)} exit ${code}: ${err.slice(-500)}`))
+      resolve({ path: outPath })
+    })
+    proc.on('error', reject)
+  })
+}
+
 async function renderSegmentClip(opts) {
   const {
     panelPaths,
@@ -155,68 +201,57 @@ async function renderSegmentClip(opts) {
 
   const totalDur = await probeDuration(audioPath)
   const perPanelDur = totalDur / panelPaths.length
-  const frames = Math.max(1, Math.round(perPanelDur * fps))
-
-  const { width: W, height: H } = dims
-  // Pre-zoompan canvas size — must be larger than output for the zoompan engine
-  // to interpolate smoothly. 4× output is the recipe ffmpeg cookbook uses to
-  // dodge the well-known "shake" artifact when zooming small images.
-  const zpInner = W * 2
+  console.log(`[renderSegmentClip] ${panelPaths.length} panels, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, out: ${path.basename(outPath)}`)
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
-  // Build inputs: each panel as a SINGLE-FRAME image (`-framerate 1 -t 1`)
-  // because zoompan multiplies output per input frame (d frames per input).
-  // With the old `-loop 1 -t perPanelDur` pattern, ffmpeg's default 25 fps
-  // input meant 25*T frames entered zoompan and each produced d=30T output
-  // frames → fg clip became ~25*T seconds instead of T, audio cut early,
-  // user only saw panel 0 for the whole segment.
-  const inputs = []
-  for (const p of panelPaths) {
-    inputs.push('-loop', '1', '-framerate', '1', '-t', '1', '-i', p)
-  }
-  inputs.push('-i', audioPath)
+  // 3-stage pipeline (avoids the multi-input filter_complex zoompan-frame-
+  // explosion bug where each panel got ~25x its intended duration and the
+  // segment showed only panel 0 until audio cut out):
+  //
+  //   Stage 1: render each panel to its own silent clip with canonical
+  //            single-input zoompan recipe (proven reliable)
+  //   Stage 2: concat panel clips → silent segment video
+  //   Stage 3: mux audio (+ optional drawtext caption) → final segment.mp4
+  //
+  // Slower than 1-pass filter_complex (N+2 ffmpeg spawns per segment) but
+  // each stage is easy to reason about + uses ffmpeg patterns from the
+  // official cookbook.
 
-  // Per-panel filter graph (single-input variant):
-  //   [Ni] split [bgN][fgN];
-  //   [bgN] scale,crop,boxblur,setsar,loop(frames-1):size=1,fps=fps [bgNb]
-  //         → tile single bg frame for perPanelDur seconds
-  //   [fgN] scale,zoompan(d=frames,fps=fps) [fgNz]
-  //         → zoompan emits exactly d=frames out for the 1 input frame
-  //   [bgNb][fgNz] overlay [vN]
-  // Both bgNb and fgNz are now exactly perPanelDur long; overlay duration
-  // matches; concat sums cleanly.
-  const loopRepeat = Math.max(0, frames - 1)
-  const parts = []
-  const tags = []
+  const tmpDir = path.join(path.dirname(outPath), `_tmp_${path.basename(outPath, '.mp4')}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+
+  // Stage 1: per-panel silent clips
+  const panelClips = []
   for (let i = 0; i < panelPaths.length; i++) {
-    parts.push(
-      `[${i}:v]split[bg${i}][fg${i}]`,
-      `[bg${i}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1,loop=loop=${loopRepeat}:size=1,fps=${fps}[bg${i}b]`,
-      `[fg${i}]scale=${zpInner}:-1:force_original_aspect_ratio=decrease,zoompan=z='min(1+0.3*on/${frames},1.3)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1[fg${i}z]`,
-      `[bg${i}b][fg${i}z]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v${i}]`
-    )
-    tags.push(`[v${i}]`)
+    const pc = path.join(tmpDir, `panel_${String(i).padStart(3, '0')}.mp4`)
+    await renderSinglePanelClip({
+      panelPath: panelPaths[i],
+      duration: perPanelDur,
+      fps,
+      dims,
+      outPath: pc
+    })
+    panelClips.push(pc)
   }
-  let lastTag = 'v'
-  if (panelPaths.length === 1) {
-    // Single panel — just rename the only chain to [v]
-    parts[parts.length - 1] = parts[parts.length - 1].replace('[v0]', '[v]')
+
+  // Stage 2: concat silent panel clips (skip concat for single-panel segment)
+  let silentVideoPath
+  if (panelClips.length === 1) {
+    silentVideoPath = panelClips[0]
   } else {
-    parts.push(`${tags.join('')}concat=n=${panelPaths.length}:v=1:a=0[v]`)
+    silentVideoPath = path.join(tmpDir, 'segment_silent.mp4')
+    await concatClips({ clipPaths: panelClips, outPath: silentVideoPath })
   }
+
+  // Stage 3: mux audio + optional drawtext caption
+  const muxArgs = ['-y', '-i', silentVideoPath, '-i', audioPath]
   if (burnCaption && captionText && captionText.trim()) {
     const fontFile = resolveFontFile()
-    if (!fontFile) {
-      console.warn('[cinematic] no system font found, skipping caption burn')
-      const last = parts[parts.length - 1]
-      parts[parts.length - 1] = last.replace(/\[v\]$/, '[vout]')
-      lastTag = 'vout'
-    } else {
+    if (fontFile) {
       const fontArg = escapeFontfilePath(fontFile)
       const wrapped = wrapCaption(captionText.trim(), subMaxLineChars)
       const escaped = escapeDrawtext(wrapped)
-      // y expression by position. top/middle/bottom relative to frame.
       let yExpr
       if (subPosition === 'top') yExpr = String(subYOffset)
       else if (subPosition === 'middle') yExpr = `(h-text_h)/2`
@@ -224,58 +259,47 @@ async function renderSegmentClip(opts) {
       const boxArg = subShowBox
         ? `box=1:boxcolor=black@${subBoxOpacity}:boxborderw=24:`
         : ''
-      parts.push(
-        `[${lastTag}]drawtext=fontfile='${fontArg}':text='${escaped}':fontsize=${subFontSize}:fontcolor=${subColor}:` +
-        `${boxArg}` +
-        `line_spacing=10:shadowcolor=black@0.6:shadowx=2:shadowy=2:` +
-        `x=(w-text_w)/2:y=${yExpr}[vout]`
-      )
-      lastTag = 'vout'
+      const drawtext =
+        `drawtext=fontfile='${fontArg}':text='${escaped}':fontsize=${subFontSize}:fontcolor=${subColor}:` +
+        `${boxArg}line_spacing=10:shadowcolor=black@0.6:shadowx=2:shadowy=2:` +
+        `x=(w-text_w)/2:y=${yExpr}`
+      muxArgs.push('-vf', drawtext, '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p')
+    } else {
+      console.warn('[cinematic] no system font found, skipping caption burn')
+      muxArgs.push('-c:v', 'copy')
     }
   } else {
-    // Rename [v] -> [vout] so mapping is uniform
-    const last = parts[parts.length - 1]
-    parts[parts.length - 1] = last.replace(/\[v\]$/, '[vout]')
-    lastTag = 'vout'
+    // No caption — stream-copy video for speed
+    muxArgs.push('-c:v', 'copy')
   }
-  const filterComplex = parts.join(';')
+  muxArgs.push('-c:a', 'aac', '-b:a', '192k', '-shortest', outPath)
 
-  // Audio index = number of image inputs (i.e. panelPaths.length)
-  const audioInputIdx = panelPaths.length
-
-  const args = [
-    '-y',
-    ...inputs,
-    '-filter_complex', filterComplex,
-    '-map', `[${lastTag}]`,
-    '-map', `${audioInputIdx}:a`,
-    '-c:v', 'libx264',
-    '-pix_fmt', 'yuv420p',
-    '-preset', 'medium',
-    '-crf', '20',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-shortest',
-    outPath
-  ]
-
-  console.log(`[renderSegmentClip] ${panelPaths.length} panels, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, frames/panel ${frames}, out: ${path.basename(outPath)}`)
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
+  await new Promise((resolve, reject) => {
+    const proc = spawn(resolveFfmpeg(), muxArgs, { windowsHide: true })
     let stderr = ''
     proc.stderr.on('data', d => { stderr += d.toString() })
     proc.on('close', code => {
       if (code !== 0) {
-        return reject(new Error(`ffmpeg exit ${code}\nLast stderr:\n${stderr.slice(-2000)}`))
+        return reject(new Error(`ffmpeg mux exit ${code}\nLast stderr:\n${stderr.slice(-2000)}`))
       }
       if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
-        return reject(new Error('ffmpeg succeeded but output missing/tiny'))
+        return reject(new Error('ffmpeg mux succeeded but output missing/tiny'))
       }
-      resolve({ path: outPath, duration: totalDur, panels: panelPaths.length })
+      resolve()
     })
     proc.on('error', reject)
   })
+
+  // Clean up tmp panel clips to save disk
+  try {
+    for (const pc of panelClips) {
+      if (pc !== silentVideoPath) fs.unlinkSync(pc)
+    }
+    if (panelClips.length > 1 && fs.existsSync(silentVideoPath)) fs.unlinkSync(silentVideoPath)
+    fs.rmdirSync(tmpDir)
+  } catch { /* leave tmp on cleanup failure — not fatal */ }
+
+  return { path: outPath, duration: totalDur, panels: panelPaths.length }
 }
 
 /**
