@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('api', {
   video: {
     render: opts => ipcRenderer.invoke('video:render', opts),
     renderBatch: opts => ipcRenderer.invoke('video:renderBatch', opts),
+    overlaySubtitle: opts => ipcRenderer.invoke('video:overlaySubtitle', opts),
     openFolder: videoPath => ipcRenderer.invoke('video:openFolder', { videoPath }),
     onProgress: cb => {
       const handler = (_e, info) => cb(info)

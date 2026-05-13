@@ -1171,6 +1171,7 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
 
   const progress = info => evt.sender.send('video:render:progress', info)
   const allClips = []
+  const segmentTimings = []
   let totalCacheHits = 0
   let totalTtsCalls = 0
 
@@ -1243,6 +1244,17 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
           subtitleStyle: subtitleStyle || {}
         })
         allClips.push(clipOut)
+        // Track segment timing for later subtitle overlay step
+        const dur = await cinematic.probeDuration(r.audioPath)
+        segmentTimings.push({
+          chapterIdx: chIdxOut,
+          chapterSlug: cSlug,
+          segmentIdx: r.segmentIdx,
+          panelStart: r.panelStart,
+          panelEnd: r.panelEnd,
+          text: r.text,
+          duration: dur
+        })
         progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ttsResults.length })
       }
     }
@@ -1250,6 +1262,35 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
     // Final concat — all clips from all chapters in order
     progress({ phase: 'concat', msg: `Ghép ${allClips.length} clip → 1 MP4...` })
     await cinematic.concatClips({ clipPaths: allClips, outPath: finalOut })
+
+    // Compute cumulative start/end seconds per segment for later subtitle
+    // overlay step. Segments concatenated in order, so each one's startSec is
+    // the running sum of previous durations.
+    const timings = []
+    let cursor = 0
+    for (const t of segmentTimings) {
+      timings.push({
+        chapterIdx: t.chapterIdx,
+        chapterSlug: t.chapterSlug,
+        segmentIdx: t.segmentIdx,
+        startSec: cursor,
+        endSec: cursor + t.duration,
+        text: t.text,
+        panelStart: t.panelStart,
+        panelEnd: t.panelEnd
+      })
+      cursor += t.duration
+    }
+
+    // Persist timings JSON next to the base video so overlay step can find them.
+    try {
+      const stampForJson = path.basename(finalOut, '.mp4')
+      const timingsPath = path.join(videosDir, `${stampForJson}.timings.json`)
+      fs.writeFileSync(timingsPath, JSON.stringify({ version: 1, timings, totalDuration: cursor }, null, 2))
+    } catch (e) {
+      console.warn('[renderBatch] failed to persist timings:', e.message)
+    }
+
     progress({ phase: 'done', outPath: finalOut })
 
     return {
@@ -1260,11 +1301,68 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
         segments: allClips.length,
         ttsHits: totalCacheHits,
         ttsCalls: totalTtsCalls,
-        bytes: fs.statSync(finalOut).size
+        bytes: fs.statSync(finalOut).size,
+        timings,
+        totalDuration: cursor
       }
     }
   } catch (e) {
     progress({ phase: 'error', error: e.message })
+    return { ok: false, error: e.message }
+  }
+})
+
+// ----- Subtitle overlay (Step 7) -----
+// Takes the base MP4 from renderBatch + segment timings + style → emits a
+// new MP4 with subtitles burned in via libass. Also writes the SRT sidecar
+// so the user can ship it separately to YouTube auto-CC.
+
+ipcMain.handle('video:overlaySubtitle', async (_e, opts) => {
+  const { workspaceId, baseMp4Path, timings, subtitleStyle, mangaSlug } = opts || {}
+  if (!baseMp4Path || !fs.existsSync(baseMp4Path)) {
+    return { ok: false, error: `Base MP4 không tồn tại: ${baseMp4Path}` }
+  }
+  if (!Array.isArray(timings) || timings.length === 0) {
+    return { ok: false, error: 'Thiếu timings — render base trước (Step 6)' }
+  }
+  try {
+    const userData = app.getPath('userData')
+    let videosDir, srtDir
+    if (workspaceId) {
+      const wsRoot = workspace.ensureWorkspaceLayout(userData, workspaceId)
+      videosDir = path.join(wsRoot, 'videos')
+      srtDir = path.join(wsRoot, 'voiceover')
+    } else {
+      videosDir = path.join(userData, 'videos')
+      srtDir = videosDir
+    }
+    fs.mkdirSync(videosDir, { recursive: true })
+    fs.mkdirSync(srtDir, { recursive: true })
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const mSlug = safeSlug(mangaSlug || 'manga')
+    const srtPath = path.join(srtDir, `${mSlug}__${stamp}.srt`)
+    const outPath = path.join(videosDir, `${mSlug}__withsub__${stamp}.mp4`)
+
+    const srt = cinematic.buildSrt(timings)
+    fs.writeFileSync(srtPath, srt, 'utf-8')
+
+    await cinematic.overlaySubtitleOnVideo({
+      inputPath: baseMp4Path,
+      srtPath,
+      outPath,
+      subtitleStyle: subtitleStyle || {}
+    })
+
+    return {
+      ok: true,
+      data: {
+        outPath,
+        srtPath,
+        bytes: fs.statSync(outPath).size
+      }
+    }
+  } catch (e) {
     return { ok: false, error: e.message }
   }
 })

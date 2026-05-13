@@ -125,11 +125,17 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   const [voiceMeta, setVoiceMeta] = useState<VoiceMeta | null>(null)
   const [demoAudio, setDemoAudio] = useState<HTMLAudioElement | null>(null)
 
-  // ── Section 5: Render ────────────────────────────────────────────────
+  // ── Step 6: Render base (no sub) ─────────────────────────────────────
   const [renderBusy, setRenderBusy] = useState(false)
   const [renderPhase, setRenderPhase] = useState<{ phase: string; i?: number; total?: number; chapterIdx?: number; chapterTotal?: number; msg?: string } | null>(null)
   const [renderError, setRenderError] = useState<string | null>(null)
   const [renderOutput, setRenderOutput] = useState<{ outPath: string; bytes: number } | null>(null)
+  const [renderTimings, setRenderTimings] = useState<{ startSec: number; endSec: number; text: string }[] | null>(null)
+
+  // ── Step 7: Subtitle overlay (final render) ──────────────────────────
+  const [finalBusy, setFinalBusy] = useState(false)
+  const [finalError, setFinalError] = useState<string | null>(null)
+  const [finalOutput, setFinalOutput] = useState<{ outPath: string; srtPath: string; bytes: number } | null>(null)
 
   // Load voice meta once
   useEffect(() => {
@@ -682,8 +688,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         })
       }
 
-      // Call batch render IPC (handles both 1 chapter and N chapters)
-      const wsAny = ws.defaults as any
+      // Render BASE — no subtitle. Subtitle is overlaid in Step 7 so it can
+      // be iterated without re-rendering the expensive cinematic+TTS chain.
       const r = await window.api.video.renderBatch({
         chapters: chaptersInput,
         referer: ws.source?.url,
@@ -692,16 +698,11 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         language: ws.defaults.language,
         mangaSlug: slugify(ws.title),
         workspaceId: ws.id,
-        subtitleEnabled: wsAny.subtitleEnabled !== false,
-        subtitleStyle: {
-          fontSize: wsAny.subtitleFontSize,
-          position: wsAny.subtitlePosition,
-          boxOpacity: wsAny.subtitleBoxOpacity,
-          showBox: wsAny.subtitleShowBox
-        }
+        subtitleEnabled: false
       })
       if (!r.ok) throw new Error(r.error)
       setRenderOutput({ outPath: r.data.outPath, bytes: r.data.bytes })
+      setRenderTimings(r.data.timings || [])
       // Mark all rendered
       if (window.api?.workspace) {
         for (const ch of selectedList) {
@@ -721,6 +722,38 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   const openOutputFolder = () => {
     if (!renderOutput || !window.api?.video) return
     window.api.video.openFolder(renderOutput.outPath)
+  }
+
+  const handleOverlaySubtitle = async () => {
+    if (!ws || !window.api?.video) return
+    if (!renderOutput || !renderTimings || renderTimings.length === 0) {
+      setFinalError('Chưa có render gốc + timings. Quay lại Step 6 render trước.')
+      return
+    }
+    setFinalBusy(true)
+    setFinalError(null)
+    setFinalOutput(null)
+    try {
+      const wsAny = ws.defaults as any
+      const r = await window.api.video.overlaySubtitle({
+        workspaceId: ws.id,
+        baseMp4Path: renderOutput.outPath,
+        timings: renderTimings,
+        subtitleStyle: {
+          fontSize: wsAny.subtitleFontSize,
+          position: wsAny.subtitlePosition,
+          boxOpacity: wsAny.subtitleBoxOpacity,
+          showBox: wsAny.subtitleShowBox
+        },
+        mangaSlug: slugify(ws.title)
+      })
+      if (!r.ok) throw new Error(r.error)
+      setFinalOutput(r.data)
+    } catch (e: any) {
+      setFinalError(e?.message || String(e))
+    } finally {
+      setFinalBusy(false)
+    }
   }
 
   return (
@@ -1498,9 +1531,9 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
             </Section>
           )}
 
-          {/* SECTION 5: Voice + subtitle (was 4) */}
+          {/* SECTION 5: Voice (was 4) */}
           {activeStep === 5 && ws && selectedList.length > 0 && (
-            <Section number={5} title="Giọng đọc + Phụ đề">
+            <Section number={5} title="Giọng đọc">
               {!voiceMeta ? (
                 <p className="text-sm text-zinc-500 italic">Đang tải danh sách voice...</p>
               ) : (
@@ -1551,29 +1584,130 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 </div>
               )}
 
-              {/* Subtitle config — burned-in caption khi render */}
-              <div className="mt-5 pt-4" style={{ borderTopColor: '#27272a', borderTopWidth: '1px' }}>
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-[11px] uppercase tracking-wider text-zinc-500">Phụ đề (burn vào video)</span>
-                  <label className="flex items-center gap-2 cursor-pointer text-xs text-zinc-300">
-                    <input
-                      type="checkbox"
-                      checked={ws.defaults.subtitleEnabled !== false}
-                      onChange={e => updateDefault({ subtitleEnabled: e.target.checked } as any)}
-                      className="accent-rose-500"
-                    />
-                    Bật phụ đề
-                  </label>
+              <StepNextBar
+                disabled={false}
+                hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()}`}
+                label="Tiếp: Render gốc"
+                onNext={() => setActiveStep(6)}
+                onBack={() => setActiveStep(4)}
+              />
+            </Section>
+          )}
+
+          {/* SECTION 6: Render base (no sub) */}
+          {activeStep === 6 && ws && selectedList.length > 0 && (
+            <Section number={6} title="Render gốc (không phụ đề)">
+              <div className="space-y-3">
+                {/* Summary */}
+                <div className="text-xs text-zinc-400 flex items-center gap-4 flex-wrap">
+                  <span>{selectedList.length} chapter</span>
+                  <span>·</span>
+                  <span>{Array.from(segments.values()).reduce((s, arr) => s + arr.length, 0)} segment tổng</span>
+                  <span>·</span>
+                  <span>Voice: <span className="text-zinc-200">{ws.defaults.voice}</span></span>
+                  <span>·</span>
+                  <span>{ws.defaults.language.toUpperCase()}</span>
                 </div>
 
-                {ws.defaults.subtitleEnabled !== false && (
+                {/* Render button */}
+                <button
+                  onClick={handleRender}
+                  disabled={renderBusy || !allSelectedHaveSegments}
+                  className="w-full py-3 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
+                  style={{ backgroundColor: renderBusy ? '#71717a' : '#f43f5e' }}
+                >
+                  {renderBusy ? 'Đang render gốc...' : (
+                    allSelectedHaveSegments
+                      ? `🎬 Render gốc — ${selectedList.length} chapter, không sub`
+                      : 'Gen voiceover cho tất cả chapter trước'
+                  )}
+                </button>
+
+                {/* Progress */}
+                {renderBusy && renderPhase && (
+                  <div
+                    className="rounded-md p-3 text-xs space-y-1.5"
+                    style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+                  >
+                    <div className="flex items-center gap-2 text-zinc-300">
+                      <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: '#f43f5e' }} />
+                      <span className="uppercase tracking-wider text-[10px] text-zinc-500">{renderPhase.phase}</span>
+                      {renderPhase.chapterIdx && renderPhase.chapterTotal && (
+                        <span className="text-zinc-500">· chapter {renderPhase.chapterIdx}/{renderPhase.chapterTotal}</span>
+                      )}
+                      {renderPhase.i != null && renderPhase.total != null && (
+                        <span className="text-zinc-500">· {renderPhase.i}/{renderPhase.total}</span>
+                      )}
+                    </div>
+                    {renderPhase.msg && (
+                      <div className="text-zinc-400 pl-4 truncate">{renderPhase.msg}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Error */}
+                {renderError && (
+                  <div
+                    className="px-3 py-2 rounded-md text-xs"
+                    style={{ backgroundColor: 'rgba(244, 63, 94, 0.08)', borderColor: 'rgba(244, 63, 94, 0.3)', color: '#fda4af', borderWidth: '1px' }}
+                  >
+                    {renderError}
+                  </div>
+                )}
+
+                {/* Output */}
+                {renderOutput && (
+                  <div
+                    className="rounded-md p-3 flex items-center gap-3"
+                    style={{ backgroundColor: 'rgba(16, 185, 129, 0.08)', borderColor: 'rgba(16, 185, 129, 0.3)', borderWidth: '1px' }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-emerald-300 font-medium">Render xong</div>
+                      <div className="text-[11px] text-zinc-400 truncate font-mono">{renderOutput.outPath}</div>
+                    </div>
+                    <button
+                      onClick={openOutputFolder}
+                      className="text-xs px-3 py-1.5 rounded text-zinc-200 hover:text-white shrink-0"
+                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                    >
+                      📁 Mở folder
+                    </button>
+                  </div>
+                )}
+              </div>
+              <StepNextBar
+                onBack={() => setActiveStep(5)}
+                onNext={renderOutput ? () => setActiveStep(7) : undefined}
+                disabled={!renderOutput}
+                label="Tiếp: Phụ đề"
+                hint={renderOutput ? 'Render gốc xong — sang Step 7 để overlay subtitle' : 'Bấm nút render ở trên'}
+              />
+            </Section>
+          )}
+
+          {/* SECTION 7: Subtitle overlay → final MP4 */}
+          {activeStep === 7 && ws && selectedList.length > 0 && (
+            <Section number={7} title="Phụ đề + xuất MP4 cuối">
+              {!renderOutput ? (
+                <p className="text-xs text-zinc-500 italic">Cần render gốc ở Step 6 trước.</p>
+              ) : (
+                <div className="space-y-4">
+                  {/* Subtitle config */}
                   <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-zinc-500">Phong cách phụ đề</span>
+                      <span className="text-[10px] text-zinc-600">Đổi style → re-render Step 7 (nhanh, không phải render gốc lại)</span>
+                    </div>
+
                     {/* Preset */}
                     <div className="grid grid-cols-4 gap-2">
                       {([
-                        { id: 'tiktok',  label: 'TikTok',  size: 56, pos: 'bottom', opacity: 0.85, box: true,  desc: 'Big, bold, dark box' },
+                        { id: 'tiktok',  label: 'TikTok',  size: 56, pos: 'bottom', opacity: 0.85, box: true,  desc: 'Big bold dark box' },
                         { id: 'youtube', label: 'YouTube', size: 40, pos: 'bottom', opacity: 0.65, box: true,  desc: 'Standard caption' },
-                        { id: 'cinema',  label: 'Cinema',  size: 38, pos: 'bottom', opacity: 0,    box: false, desc: 'No box, shadow only' },
+                        { id: 'cinema',  label: 'Cinema',  size: 38, pos: 'bottom', opacity: 0,    box: false, desc: 'Shadow only, no box' },
                         { id: 'mini',    label: 'Mini',    size: 30, pos: 'bottom', opacity: 0.4,  box: true,  desc: 'Small, unobtrusive' }
                       ] as const).map(p => {
                         const isActive = (ws.defaults.subtitlePreset || 'tiktok') === p.id
@@ -1653,11 +1787,11 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
 
                     {/* Preview */}
                     <div
-                      className="rounded-md p-4 flex items-end justify-center"
+                      className="rounded-md p-4 flex justify-center"
                       style={{
                         background: 'linear-gradient(135deg, #1c1917, #292524)',
-                        height: 100,
-                        position: 'relative'
+                        height: 110,
+                        alignItems: ws.defaults.subtitlePosition === 'top' ? 'flex-start' : ws.defaults.subtitlePosition === 'middle' ? 'center' : 'flex-end'
                       }}
                     >
                       <div
@@ -1671,118 +1805,65 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                             : `rgba(0,0,0,${ws.defaults.subtitleBoxOpacity ?? 0.65})`,
                           textShadow: '1px 1px 2px rgba(0,0,0,0.6)',
                           maxWidth: '80%',
-                          textAlign: 'center',
-                          alignSelf: ws.defaults.subtitlePosition === 'top'
-                            ? 'flex-start'
-                            : ws.defaults.subtitlePosition === 'middle'
-                            ? 'center'
-                            : 'flex-end'
+                          textAlign: 'center'
                         }}
                       >
                         Đại Lăng ngồi giữa rừng tre vắng lặng...
                       </div>
                     </div>
                   </div>
-                )}
-              </div>
 
-              <StepNextBar
-                disabled={false}
-                hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()} · Sub: ${ws.defaults.subtitleEnabled === false ? 'OFF' : (ws.defaults.subtitlePreset || 'tiktok')}`}
-                label="Tiếp: Render"
-                onNext={() => setActiveStep(6)}
-                onBack={() => setActiveStep(4)}
-              />
-            </Section>
-          )}
-
-          {/* SECTION 6: Render (was 5) */}
-          {activeStep === 6 && ws && selectedList.length > 0 && (
-            <Section number={6} title="Render video">
-              <div className="space-y-3">
-                {/* Summary */}
-                <div className="text-xs text-zinc-400 flex items-center gap-4 flex-wrap">
-                  <span>{selectedList.length} chapter</span>
-                  <span>·</span>
-                  <span>{Array.from(segments.values()).reduce((s, arr) => s + arr.length, 0)} segment tổng</span>
-                  <span>·</span>
-                  <span>Voice: <span className="text-zinc-200">{ws.defaults.voice}</span></span>
-                  <span>·</span>
-                  <span>{ws.defaults.language.toUpperCase()}</span>
-                </div>
-
-                {/* Render button */}
-                <button
-                  onClick={handleRender}
-                  disabled={renderBusy || !allSelectedHaveSegments}
-                  className="w-full py-3 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
-                  style={{ backgroundColor: renderBusy ? '#71717a' : '#f43f5e' }}
-                >
-                  {renderBusy ? 'Đang render...' : (
-                    allSelectedHaveSegments
-                      ? `🎬 Render ${selectedList.length} chapter → 1 MP4`
-                      : 'Gen voiceover cho tất cả chapter trước'
-                  )}
-                </button>
-
-                {/* Progress */}
-                {renderBusy && renderPhase && (
-                  <div
-                    className="rounded-md p-3 text-xs space-y-1.5"
-                    style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+                  {/* Render final button */}
+                  <button
+                    onClick={handleOverlaySubtitle}
+                    disabled={finalBusy}
+                    className="w-full py-3 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
+                    style={{ backgroundColor: finalBusy ? '#71717a' : '#f43f5e' }}
                   >
-                    <div className="flex items-center gap-2 text-zinc-300">
-                      <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: '#f43f5e' }} />
-                      <span className="uppercase tracking-wider text-[10px] text-zinc-500">{renderPhase.phase}</span>
-                      {renderPhase.chapterIdx && renderPhase.chapterTotal && (
-                        <span className="text-zinc-500">· chapter {renderPhase.chapterIdx}/{renderPhase.chapterTotal}</span>
-                      )}
-                      {renderPhase.i != null && renderPhase.total != null && (
-                        <span className="text-zinc-500">· {renderPhase.i}/{renderPhase.total}</span>
-                      )}
-                    </div>
-                    {renderPhase.msg && (
-                      <div className="text-zinc-400 pl-4 truncate">{renderPhase.msg}</div>
-                    )}
-                  </div>
-                )}
+                    {finalBusy ? 'Đang overlay subtitle...' : `📝 Render final với sub (${renderTimings?.length || 0} segments)`}
+                  </button>
 
-                {/* Error */}
-                {renderError && (
-                  <div
-                    className="px-3 py-2 rounded-md text-xs"
-                    style={{ backgroundColor: 'rgba(244, 63, 94, 0.08)', borderColor: 'rgba(244, 63, 94, 0.3)', color: '#fda4af', borderWidth: '1px' }}
-                  >
-                    {renderError}
-                  </div>
-                )}
-
-                {/* Output */}
-                {renderOutput && (
-                  <div
-                    className="rounded-md p-3 flex items-center gap-3"
-                    style={{ backgroundColor: 'rgba(16, 185, 129, 0.08)', borderColor: 'rgba(16, 185, 129, 0.3)', borderWidth: '1px' }}
-                  >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-emerald-300 font-medium">Render xong</div>
-                      <div className="text-[11px] text-zinc-400 truncate font-mono">{renderOutput.outPath}</div>
-                    </div>
-                    <button
-                      onClick={openOutputFolder}
-                      className="text-xs px-3 py-1.5 rounded text-zinc-200 hover:text-white shrink-0"
-                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                  {finalError && (
+                    <div
+                      className="px-3 py-2 rounded-md text-xs"
+                      style={{ backgroundColor: 'rgba(244, 63, 94, 0.08)', borderColor: 'rgba(244, 63, 94, 0.3)', color: '#fda4af', borderWidth: '1px' }}
                     >
-                      📁 Mở folder
-                    </button>
-                  </div>
-                )}
-              </div>
+                      {finalError}
+                    </div>
+                  )}
+
+                  {finalOutput && (
+                    <div
+                      className="rounded-md p-3 space-y-2"
+                      style={{ backgroundColor: 'rgba(16, 185, 129, 0.08)', borderColor: 'rgba(16, 185, 129, 0.3)', borderWidth: '1px' }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs text-emerald-300 font-medium">Final MP4 với phụ đề</div>
+                          <div className="text-[11px] text-zinc-400 truncate font-mono">{finalOutput.outPath}</div>
+                        </div>
+                        <button
+                          onClick={() => window.api?.video?.openFolder(finalOutput.outPath)}
+                          className="text-xs px-3 py-1.5 rounded text-zinc-200 hover:text-white shrink-0"
+                          style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                        >
+                          📁 Mở
+                        </button>
+                      </div>
+                      <div className="text-[11px] text-zinc-500 pl-7">
+                        SRT sidecar (upload riêng YouTube auto-CC): <span className="font-mono">{finalOutput.srtPath}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <StepNextBar
-                onBack={() => setActiveStep(5)}
-                hint={renderOutput ? 'Hoàn thành — sếp có thể đổi voice/chapter để re-render' : 'Bấm "Render video" ở trên để chạy pipeline'}
+                onBack={() => setActiveStep(6)}
+                hint={finalOutput ? 'Hoàn thành — đổi sub style + bấm lại sẽ ra MP4 mới' : 'Render gốc + cấu hình sub → bấm Render final'}
               />
             </Section>
           )}
@@ -1804,7 +1885,7 @@ function slugify(s: string): string {
 
 // ─── Pipeline sidebar ────────────────────────────────────────────────────
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7
 
 interface PipelineNavProps {
   activeStep: Step
@@ -1846,8 +1927,12 @@ function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, all
       status: !allDownloaded ? 'locked' : 'ready'
     },
     {
-      n: 6, title: 'Render', sub: renderDone ? 'Hoàn thành' : (allHaveSegments ? 'Sẵn sàng' : 'Đợi voiceover'),
+      n: 6, title: 'Render gốc', sub: renderDone ? 'Hoàn thành (no sub)' : (allHaveSegments ? 'Sẵn sàng' : 'Đợi voiceover'),
       status: !allHaveSegments ? 'locked' : (renderDone ? 'done' : 'ready')
+    },
+    {
+      n: 7, title: 'Phụ đề + Final', sub: 'Subtitle + xuất MP4 cuối',
+      status: !renderDone ? 'locked' : 'ready'
     }
   ]
 

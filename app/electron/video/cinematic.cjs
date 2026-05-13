@@ -319,10 +319,96 @@ async function concatClips({ clipPaths, outPath }) {
   return { path: outPath, clips: clipPaths.length }
 }
 
+/**
+ * Build an SRT subtitle file from segment timings.
+ * timings = [{ startSec, endSec, text }]
+ */
+function buildSrt(timings) {
+  const fmt = sec => {
+    const ms = Math.max(0, Math.round(sec * 1000))
+    const h = Math.floor(ms / 3600000)
+    const m = Math.floor((ms % 3600000) / 60000)
+    const s = Math.floor((ms % 60000) / 1000)
+    const mm = ms % 1000
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(mm).padStart(3, '0')}`
+  }
+  return timings.map((t, i) => {
+    const text = String(t.text || '').replace(/\r?\n/g, ' ').trim()
+    return `${i + 1}\n${fmt(t.startSec)} --> ${fmt(t.endSec)}\n${text}\n`
+  }).join('\n')
+}
+
+/**
+ * Overlay subtitles from an SRT file onto an existing MP4 via ffmpeg's
+ * `subtitles=` (libass). Single video re-encode + audio copy.
+ */
+async function overlaySubtitleOnVideo(opts) {
+  const {
+    inputPath,
+    srtPath,
+    outPath,
+    subtitleStyle = {}
+  } = opts
+  if (!fs.existsSync(inputPath)) throw new Error(`Input MP4 not found: ${inputPath}`)
+  if (!fs.existsSync(srtPath)) throw new Error(`SRT not found: ${srtPath}`)
+  fs.mkdirSync(path.dirname(outPath), { recursive: true })
+
+  const fontSize = Number(subtitleStyle.fontSize) || 42
+  const position = ['top', 'middle', 'bottom'].includes(subtitleStyle.position) ? subtitleStyle.position : 'bottom'
+  const boxOpacity = Number.isFinite(subtitleStyle.boxOpacity) ? subtitleStyle.boxOpacity : 0.65
+  const showBox = subtitleStyle.showBox !== false
+  const fontFile = resolveFontFile()
+
+  // libass ASS alignment: 2=bottom-center, 5=top-center, 10=middle-center
+  const alignment = position === 'top' ? 5 : position === 'middle' ? 10 : 2
+  // BackColour: &HAABBGGRR. Alpha 00=opaque, FF=transparent.
+  const alphaHex = Math.round((1 - boxOpacity) * 255).toString(16).padStart(2, '0').toUpperCase()
+  const backColour = showBox ? `&H${alphaHex}000000` : '&HFF000000'
+  const borderStyle = showBox ? 4 : 1 // 4=opaque box, 1=outline+shadow only
+  const styleParts = [
+    `FontName=${fontFile ? path.basename(fontFile, path.extname(fontFile)) : 'Arial'}`,
+    `FontSize=${fontSize}`,
+    `PrimaryColour=&H00FFFFFF`,
+    `BackColour=${backColour}`,
+    `BorderStyle=${borderStyle}`,
+    `Outline=2`,
+    `Shadow=1`,
+    `Alignment=${alignment}`,
+    `MarginV=60`
+  ].join(',')
+
+  const srtArg = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+  const vf = `subtitles='${srtArg}':force_style='${styleParts}'`
+
+  const args = [
+    '-y',
+    '-i', inputPath,
+    '-vf', vf,
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    '-crf', '20',
+    '-c:a', 'copy',
+    outPath
+  ]
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
+    let err = ''
+    proc.stderr.on('data', d => { err += d.toString() })
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`ffmpeg subtitle overlay exit ${code}: ${err.slice(-600)}`))
+      resolve({ path: outPath })
+    })
+    proc.on('error', reject)
+  })
+}
+
 module.exports = {
   renderSegmentClip,
   concatClips,
   probeDuration,
   resolveFfmpeg,
-  resolveFfprobe
+  resolveFfprobe,
+  buildSrt,
+  overlaySubtitleOnVideo
 }

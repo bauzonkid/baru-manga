@@ -123,7 +123,16 @@ interface Api {
       ttsHits: number
       ttsCalls: number
       bytes: number
+      timings: { chapterIdx: number; chapterSlug: string; segmentIdx: number; startSec: number; endSec: number; text: string; panelStart: number; panelEnd: number }[]
+      totalDuration: number
     }>>
+    overlaySubtitle: (opts: {
+      workspaceId?: string
+      baseMp4Path: string
+      timings: { startSec: number; endSec: number; text: string }[]
+      subtitleStyle: { fontSize?: number; position?: 'top' | 'middle' | 'bottom'; boxOpacity?: number; showBox?: boolean }
+      mangaSlug: string
+    }) => Promise<IpcResult<{ outPath: string; srtPath: string; bytes: number }>>
     openFolder: (videoPath: string) => Promise<IpcResult<unknown>>
     onProgress: (cb: (info: VideoProgress) => void) => () => void
   }
