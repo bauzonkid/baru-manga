@@ -905,13 +905,35 @@ ipcMain.handle('tts:meta', async () => ({
  * or throws with a clear error message. Shared between `tts:speak` (single
  * preview call) and `tts:speakBatch` (cached bulk render in M4).
  */
+// Normalize short language code (vi, th, en, ko, ja) → BCP-47 (vi-VN, ...).
+// Gemini TTS requires full locale tag; short codes silently fall back to
+// en-US, which is why Vietnamese text was being read with an English
+// accent that varied per call (Gemini's English voice realizing VN
+// sounds inconsistently).
+function normalizeBcp47(code) {
+  if (!code) return 'en-US'
+  const c = String(code).trim()
+  if (/^[a-z]{2}-[A-Z]{2}$/.test(c)) return c // already BCP-47
+  const map = {
+    vi: 'vi-VN',
+    th: 'th-TH',
+    en: 'en-US',
+    ko: 'ko-KR',
+    ja: 'ja-JP',
+    zh: 'zh-CN',
+    id: 'id-ID'
+  }
+  return map[c.toLowerCase()] || c
+}
+
 async function fetchTtsWav({ text, voice, model, language, stylePrompt }) {
   const v = (voice || 'Charon').trim()
   const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
   const modelWithVoice = `${m.replace(/\/$/, '')}/${v}`
-  const payload = { model: modelWithVoice, input: text }
-  if (language && language.trim()) payload.language = language.trim()
+  const langCode = normalizeBcp47(language)
+  const payload = { model: modelWithVoice, input: text, language: langCode }
   if (stylePrompt && stylePrompt.trim()) payload.prompt = stylePrompt.trim()
+  console.log('[fetchTtsWav]', { voice: v, model: m, language: langCode, textPreview: text.slice(0, 50) })
 
   const res = await fetch(`${ROUTER_BASE}/audio/speech`, {
     method: 'POST',
@@ -973,7 +995,7 @@ ipcMain.handle('tts:speakBatch', async (evt, { segments, voice, model, language 
   }
   const v = (voice || 'Charon').trim()
   const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
-  const lang = (language || 'en-US').trim()
+  const lang = normalizeBcp47(language)
   const baseDir = path.join(app.getPath('userData'), 'video-cache')
 
   const out = []
@@ -1060,7 +1082,7 @@ ipcMain.handle('video:render', async (evt, opts) => {
   const vSlug = safeSlug(voice || 'charon')
   const v = (voice || 'Charon').trim()
   const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
-  const lang = (language || 'en-US').trim()
+  const lang = normalizeBcp47(language)
 
   const userData = app.getPath('userData')
   const downloadsDir = path.join(userData, 'downloads', mSlug, cSlug)
@@ -1190,7 +1212,7 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
   const vSlug = safeSlug(voice || 'charon')
   const v = (voice || 'Charon').trim()
   const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
-  const lang = (language || 'en-US').trim()
+  const lang = normalizeBcp47(language)
 
   const userData = app.getPath('userData')
   // Per-workspace layout (preferred) — all derived artifacts land inside the
