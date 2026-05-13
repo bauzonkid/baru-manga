@@ -368,10 +368,68 @@ async function concatClips({ clipPaths, outPath }) {
 }
 
 /**
- * Build an SRT subtitle file from segment timings.
+ * Split a long narration string into TikTok-style readable chunks at
+ * natural breaks (sentence, then clause, then word) so no chunk exceeds
+ * ~`maxChars`. Keeps text exactly — only splits whitespace boundaries.
+ */
+function splitTextForSubtitle(text, maxChars = 60) {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!cleaned) return []
+  if (cleaned.length <= maxChars) return [cleaned]
+
+  // Pass 1: split on sentence boundaries (. ! ? …)
+  const sentences = cleaned
+    .split(/(?<=[.!?…])\s+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+
+  // Pass 2: any sentence still too long → split on commas/semicolons
+  const clauseSplit = []
+  for (const s of sentences) {
+    if (s.length <= maxChars) { clauseSplit.push(s); continue }
+    const clauses = s.split(/(?<=[,;:])\s+/).map(c => c.trim()).filter(Boolean)
+    let cur = ''
+    for (const c of clauses) {
+      if (cur && (cur + ' ' + c).length > maxChars) {
+        clauseSplit.push(cur)
+        cur = c
+      } else {
+        cur = cur ? cur + ' ' + c : c
+      }
+    }
+    if (cur) clauseSplit.push(cur)
+  }
+
+  // Pass 3: still too long → hard split on word boundaries
+  const out = []
+  for (const p of clauseSplit) {
+    if (p.length <= maxChars) { out.push(p); continue }
+    const words = p.split(' ')
+    let cur = ''
+    for (const w of words) {
+      if (cur && (cur + ' ' + w).length > maxChars) {
+        out.push(cur)
+        cur = w
+      } else {
+        cur = cur ? cur + ' ' + w : w
+      }
+    }
+    if (cur) out.push(cur)
+  }
+
+  return out
+}
+
+/**
+ * Build an SRT subtitle file from segment timings. Each segment's text
+ * is split into chunks; chunks share the segment's audio duration
+ * proportionally (split evenly across chunks). Result: shorter on-screen
+ * subtitle slots that swap as the narration progresses.
+ *
  * timings = [{ startSec, endSec, text }]
  */
-function buildSrt(timings) {
+function buildSrt(timings, opts = {}) {
+  const maxChars = Number(opts.maxChars) || 60
   const fmt = sec => {
     const ms = Math.max(0, Math.round(sec * 1000))
     const h = Math.floor(ms / 3600000)
@@ -380,10 +438,24 @@ function buildSrt(timings) {
     const mm = ms % 1000
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(mm).padStart(3, '0')}`
   }
-  return timings.map((t, i) => {
-    const text = String(t.text || '').replace(/\r?\n/g, ' ').trim()
-    return `${i + 1}\n${fmt(t.startSec)} --> ${fmt(t.endSec)}\n${text}\n`
-  }).join('\n')
+
+  const entries = []
+  let idx = 1
+  for (const t of timings) {
+    const segDur = Math.max(0.1, t.endSec - t.startSec)
+    const chunks = splitTextForSubtitle(t.text, maxChars)
+    if (chunks.length === 0) continue
+    const perChunkDur = segDur / chunks.length
+    let cursor = t.startSec
+    for (const c of chunks) {
+      const start = cursor
+      const end = Math.min(t.endSec, cursor + perChunkDur)
+      entries.push(`${idx}\n${fmt(start)} --> ${fmt(end)}\n${c}\n`)
+      cursor = end
+      idx++
+    }
+  }
+  return entries.join('\n')
 }
 
 /**

@@ -122,6 +122,7 @@ interface Api {
         boxOpacity?: number
         showBox?: boolean
         yOffset?: number
+        maxCharsPerChunk?: number
       }
     }) => Promise<IpcResult<{
       outPath: string
@@ -137,7 +138,7 @@ interface Api {
       workspaceId?: string
       baseMp4Path: string
       timings: { startSec: number; endSec: number; text: string }[]
-      subtitleStyle: { fontSize?: number; position?: 'top' | 'middle' | 'bottom'; boxOpacity?: number; showBox?: boolean }
+      subtitleStyle: { fontSize?: number; position?: 'top' | 'middle' | 'bottom'; boxOpacity?: number; showBox?: boolean; maxCharsPerChunk?: number }
       mangaSlug: string
     }) => Promise<IpcResult<{ outPath: string; srtPath: string; bytes: number }>>
     openFolder: (videoPath: string) => Promise<IpcResult<unknown>>

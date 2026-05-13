@@ -1461,7 +1461,8 @@ ipcMain.handle('video:overlaySubtitle', async (_e, opts) => {
     const srtPath = path.join(srtDir, `${mSlug}__${stamp}.srt`)
     const outPath = path.join(videosDir, `${mSlug}__withsub__${stamp}.mp4`)
 
-    const srt = cinematic.buildSrt(timings)
+    const maxChars = Number(subtitleStyle?.maxCharsPerChunk) || 60
+    const srt = cinematic.buildSrt(timings, { maxChars })
     fs.writeFileSync(srtPath, srt, 'utf-8')
 
     await cinematic.overlaySubtitleOnVideo({

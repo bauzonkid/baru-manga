@@ -40,6 +40,7 @@ interface WorkspaceData {
     subtitlePosition?: 'top' | 'middle' | 'bottom'
     subtitleBoxOpacity?: number
     subtitleShowBox?: boolean
+    subtitleMaxChars?: number
   }
 }
 
@@ -804,7 +805,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           fontSize: wsAny.subtitleFontSize,
           position: wsAny.subtitlePosition,
           boxOpacity: wsAny.subtitleBoxOpacity,
-          showBox: wsAny.subtitleShowBox
+          showBox: wsAny.subtitleShowBox,
+          maxCharsPerChunk: wsAny.subtitleMaxChars || 60
         },
         mangaSlug: slugify(ws.title)
       })
@@ -1805,7 +1807,7 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                     </div>
 
                     {/* Fine tune */}
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-4 gap-2">
                       <label className="flex flex-col gap-1">
                         <span className="text-[10px] uppercase tracking-wider text-zinc-600">Cỡ chữ</span>
                         <input
@@ -1852,13 +1854,29 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                           <option value="none">Không nền</option>
                         </select>
                       </label>
+                      <label className="flex flex-col gap-1" title="Max ký tự / 1 slot sub. Câu dài segment sẽ tự cắt thành nhiều slot.">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-600">Chia chữ</span>
+                        <select
+                          value={String(ws.defaults.subtitleMaxChars || 60)}
+                          onChange={e => updateDefault({ subtitleMaxChars: Number(e.target.value) } as any)}
+                          className="px-2 py-1.5 text-sm rounded outline-none"
+                          style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                        >
+                          <option value="30">Ngắn (30 chữ)</option>
+                          <option value="45">Vừa (45 chữ)</option>
+                          <option value="60">Dài (60 chữ)</option>
+                          <option value="90">Rất dài (90 chữ)</option>
+                        </select>
+                      </label>
                     </div>
 
                     {/* Live preview — base render MP4 with CSS-overlaid subtitle */}
                     {(() => {
-                      // Sample subtitle text = first segment with content,
-                      // so the preview mirrors what'll actually be burned in
-                      const sampleText = (() => {
+                      // Sample text = first segment with content. Split into
+                      // chunks (same algo as backend buildSrt) so preview
+                      // shows just the FIRST chunk — what viewers actually see
+                      // at any moment, not the whole paragraph at once.
+                      const fullText = (() => {
                         for (const ch of selectedList) {
                           const segs = segments.get(ch.id)
                           const first = segs?.find(s => s.text?.trim())
@@ -1870,12 +1888,15 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                       const subPos = ws.defaults.subtitlePosition || 'bottom'
                       const subBoxOn = ws.defaults.subtitleShowBox !== false
                       const subOpacity = ws.defaults.subtitleBoxOpacity ?? 0.65
+                      const maxChars = ws.defaults.subtitleMaxChars || 60
+                      const chunks = splitTextForSubtitlePreview(fullText, maxChars)
+                      const sampleText = chunks[0] || fullText
                       return (
                         <div className="space-y-1.5">
                           <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-2">
                             <span>Preview live</span>
                             <span className="text-zinc-700">·</span>
-                            <span className="text-zinc-600">Đổi setting trên → cập nhật ngay trên video gốc</span>
+                            <span className="text-zinc-600">Câu dài → cắt thành {chunks.length} slot · đổi setting → cập nhật ngay</span>
                           </div>
                           <div
                             className="rounded-md overflow-hidden relative"
@@ -1989,6 +2010,38 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
 function slugify(s: string): string {
   return s.normalize('NFKD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 60) || 'manga'
+}
+
+// Mirror of cinematic.cjs splitTextForSubtitle — kept in sync so the
+// live preview shows exactly what the SRT will contain at any moment.
+function splitTextForSubtitlePreview(text: string, maxChars = 60): string[] {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!cleaned) return []
+  if (cleaned.length <= maxChars) return [cleaned]
+  const sentences = cleaned.split(/(?<=[.!?…])\s+/).map(s => s.trim()).filter(Boolean)
+  const clauseSplit: string[] = []
+  for (const s of sentences) {
+    if (s.length <= maxChars) { clauseSplit.push(s); continue }
+    const clauses = s.split(/(?<=[,;:])\s+/).map(c => c.trim()).filter(Boolean)
+    let cur = ''
+    for (const c of clauses) {
+      if (cur && (cur + ' ' + c).length > maxChars) { clauseSplit.push(cur); cur = c }
+      else cur = cur ? cur + ' ' + c : c
+    }
+    if (cur) clauseSplit.push(cur)
+  }
+  const out: string[] = []
+  for (const p of clauseSplit) {
+    if (p.length <= maxChars) { out.push(p); continue }
+    const words = p.split(' ')
+    let cur = ''
+    for (const w of words) {
+      if (cur && (cur + ' ' + w).length > maxChars) { out.push(cur); cur = w }
+      else cur = cur ? cur + ' ' + w : w
+    }
+    if (cur) out.push(cur)
+  }
+  return out
 }
 
 // ─── Pipeline sidebar ────────────────────────────────────────────────────
