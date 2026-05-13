@@ -449,21 +449,17 @@ ipcMain.handle('chapter:splitPanels', async (evt, { workspaceId, chapterSlug, op
 
     const onProgress = info => evt.sender.send('chapter:splitPanels:progress', info)
     const panelSplit = require('./video/panelSplit.cjs')
-    const useAI = mode !== 'cv'
-    const result = useAI
-      ? await panelSplit.splitChapterPanelsAI({
-          stripPaths: stripFiles,
-          outDir: panelsDir,
-          opts: opts || {},
-          onProgress
-        })
-      : await panelSplit.splitChapterPanels({
-          stripPaths: stripFiles,
-          outDir: panelsDir,
-          opts: opts || {},
-          onProgress
-        })
-    return { ok: true, data: { ...result, panelsDir, mode: useAI ? 'ai' : 'cv' } }
+    let result, modeUsed
+    if (mode === 'cv') {
+      result = await panelSplit.splitChapterPanels({ stripPaths: stripFiles, outDir: panelsDir, opts: opts || {}, onProgress })
+      modeUsed = 'cv'
+    } else {
+      // Default AI mode = batch (1+ chunks, all images in 1 API call per chunk).
+      // Per-strip mode kept as fallback if batch fails repeatedly.
+      result = await panelSplit.splitChapterPanelsAIBatch({ stripPaths: stripFiles, outDir: panelsDir, opts: opts || {}, onProgress })
+      modeUsed = 'ai-batch'
+    }
+    return { ok: true, data: { ...result, panelsDir, mode: modeUsed } }
   } catch (e) {
     return { ok: false, error: e.message }
   }
@@ -1443,10 +1439,11 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
         progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ch.segments.length, cached: result.cached, hash: result.hash })
       }
 
-      // Phase 3: render clips. Prefer AI-picked keyPanels (the visual beats
-      // viewers should actually see); fall back to full range only if AI
-      // didn't provide them.
-      progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ttsResults.length, msg: 'Render cinematic clips...' })
+      // Phase 3: render clips. New approach — vstack the strips AI picked
+      // for this segment (keyPanels), then vertically scroll across the
+      // combined image during the audio. Avoids strobe + handles
+      // multi-panel strips naturally (whole strip scrolls past camera).
+      progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ttsResults.length, msg: 'Render scroll clips...' })
       for (let i = 0; i < ttsResults.length; i++) {
         const r = ttsResults[i]
         let panelIndices
@@ -1456,19 +1453,16 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
           panelIndices = []
           for (let p = r.panelStart; p <= r.panelEnd; p++) panelIndices.push(p)
         }
-        const panels = panelIndices.map(idx => localPaths[idx])
-        console.log(`[renderBatch] segment ${i}: range [${r.panelStart}..${r.panelEnd}], keyPanels [${panelIndices.join(',')}] = ${panels.length} ảnh, text="${(r.text || '').slice(0, 60)}..."`)
-        if (panels.length === 0) {
-          console.warn(`[renderBatch] segment ${i} has 0 panels! (range start=${r.panelStart}, end=${r.panelEnd}, keyPanels=${JSON.stringify(r.keyPanels)}, localPaths length=${localPaths.length})`)
+        const strips = panelIndices.map(idx => localPaths[idx])
+        console.log(`[renderBatch] segment ${i}: range [${r.panelStart}..${r.panelEnd}], strips [${panelIndices.join(',')}] = ${strips.length} file, text="${(r.text || '').slice(0, 60)}..."`)
+        if (strips.length === 0) {
+          console.warn(`[renderBatch] segment ${i} has 0 strips! (range start=${r.panelStart}, end=${r.panelEnd}, keyPanels=${JSON.stringify(r.keyPanels)}, localPaths length=${localPaths.length})`)
         }
         const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
-        await cinematic.renderSegmentClip({
-          panelPaths: panels,
+        await cinematic.renderSegmentScroll({
+          stripPaths: strips,
           audioPath: r.audioPath,
-          captionText: r.text,
-          outPath: clipOut,
-          burnCaption: subtitleEnabled !== false,
-          subtitleStyle: subtitleStyle || {}
+          outPath: clipOut
         })
         allClips.push(clipOut)
         // Track segment timing for later subtitle overlay step

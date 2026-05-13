@@ -396,11 +396,185 @@ async function splitChapterPanels({ stripPaths, outDir, onProgress, opts = {} })
   return { panelPaths, panelCount: panelPaths.length, sourceStrips: stripPaths.length }
 }
 
+const BATCH_PROMPT = `You will receive {{N}} manga page strip images, in order (1st image = page 1, 2nd = page 2, etc). For EACH page, identify panel bounding boxes within that single page strip.
+
+Return ONLY this JSON (no markdown, no commentary):
+{
+  "pages": [
+    { "panels": [{ "yTopPct": <0.0-1.0>, "yBottomPct": <0.0-1.0> }, ...] },
+    { "panels": [...] },
+    ...
+  ]
+}
+
+Rules:
+- "pages" array must have EXACTLY {{N}} entries — one per input image, in the same order.
+- Each page's "panels" list contains 1+ panels found in that page, top-to-bottom.
+- yTopPct/yBottomPct are normalized 0–1 vertical coords WITHIN that page's image (0 = top, 1 = bottom).
+- Tightly enclose panel content. Exclude whitespace above/below.
+- Panels in one page must not overlap (yTopPct of panel N+1 > yBottomPct of panel N).
+- If a whole page is one big panel, return [{ "yTopPct": 0.0, "yBottomPct": 1.0 }].
+- Exclude publisher watermarks at very bottom.
+
+Return ONLY the JSON object.`
+
+function buildImageContent(stripPaths, startIdx, endIdx) {
+  const out = []
+  for (let i = startIdx; i < endIdx; i++) {
+    const sp = stripPaths[i]
+    const buf = fs.readFileSync(sp)
+    const ext = path.extname(sp).slice(1).toLowerCase()
+    const mime = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/jpeg'
+    out.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${buf.toString('base64')}` } })
+  }
+  return out
+}
+
+async function detectPanelsBatch(stripPaths, startIdx, endIdx) {
+  const N = endIdx - startIdx
+  const content = [
+    { type: 'text', text: BATCH_PROMPT.replace(/\{\{N\}\}/g, String(N)) },
+    ...buildImageContent(stripPaths, startIdx, endIdx)
+  ]
+  let lastError = ''
+  for (const model of VISION_MODELS_PANEL_DETECT) {
+    try {
+      const res = await callRouter(model, {
+        messages: [{ role: 'user', content }],
+        temperature: 0,
+        max_tokens: 8192,
+        response_format: { type: 'json_object' },
+        stream: false
+      })
+      if (!res.ok) { lastError = `${model}: HTTP ${res.status}`; continue }
+      const data = await res.json()
+      const text = data.choices?.[0]?.message?.content || '{}'
+      let parsed = null
+      try { parsed = JSON.parse(text) } catch {
+        const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+        if (fenced) { try { parsed = JSON.parse(fenced[1]) } catch {} }
+      }
+      if (Array.isArray(parsed?.pages)) return parsed.pages
+      lastError = `${model}: response missing pages[]`
+    } catch (e) {
+      lastError = `${model}: ${e.message}`
+    }
+  }
+  throw new Error(`AI batch detect failed: ${lastError}`)
+}
+
 /**
- * AI-based variant: send each strip to Gemini Vision, get panel bounding
- * boxes, ffmpeg crop. No vstack — each strip processed independently. Cost
- * ~$0.005 per page (Flash). For a 79-page chapter ≈ $0.05–0.10 + 3–5 min.
- * Results cached in _meta.json so re-run is free.
+ * Batch AI variant: send all strips in 1 API call (or auto-chunked for
+ * very large chapters). Gemini Vision returns bboxes for all pages at
+ * once → faster than per-strip sequential calls.
+ *
+ * Auto-chunking: > BATCH_SIZE strips → split into chunks. Each chunk
+ * is 1 API call. Chunk results merged in order.
+ */
+async function splitChapterPanelsAIBatch({ stripPaths, outDir, onProgress, opts = {} }) {
+  if (stripPaths.length === 0) throw new Error('no strips')
+  fs.mkdirSync(outDir, { recursive: true })
+
+  const BATCH_SIZE = opts.batchSize || 30 // 30 strips/call — balances speed vs Gemini context
+
+  // Collect all pages results in order
+  const allPages = []
+  const totalChunks = Math.ceil(stripPaths.length / BATCH_SIZE)
+  for (let c = 0; c < totalChunks; c++) {
+    const start = c * BATCH_SIZE
+    const end = Math.min(stripPaths.length, start + BATCH_SIZE)
+    onProgress?.({
+      phase: 'ai-detect',
+      i: c + 1,
+      total: totalChunks,
+      msg: `AI nhận ${end - start} pages (chunk ${c + 1}/${totalChunks})...`
+    })
+    let chunkPages
+    try {
+      chunkPages = await detectPanelsBatch(stripPaths, start, end)
+    } catch (e) {
+      console.warn(`[splitChapterPanelsAIBatch] chunk ${c + 1} AI fail (${e.message}), falling back to whole-page per strip in chunk`)
+      chunkPages = []
+    }
+    // Pad if AI returned fewer entries than expected
+    for (let i = 0; i < (end - start); i++) {
+      const entry = chunkPages[i] || { panels: [{ yTopPct: 0, yBottomPct: 1 }] }
+      allPages.push(entry)
+    }
+  }
+
+  // Crop using AI bboxes
+  let panelIdx = 0
+  const panelPaths = []
+  const allBboxes = []
+  for (let s = 0; s < stripPaths.length; s++) {
+    const pageData = allPages[s]
+    const raw = Array.isArray(pageData?.panels) ? pageData.panels : []
+    const clean = []
+    for (const p of raw) {
+      const top = Math.max(0, Math.min(1, Number(p?.yTopPct)))
+      const bot = Math.max(0, Math.min(1, Number(p?.yBottomPct)))
+      if (!Number.isFinite(top) || !Number.isFinite(bot)) continue
+      if (bot - top < 0.02) continue
+      const lastEnd = clean.length > 0 ? clean[clean.length - 1].yBottomPct : 0
+      const fixedTop = Math.max(top, lastEnd)
+      if (bot - fixedTop < 0.02) continue
+      clean.push({ yTopPct: fixedTop, yBottomPct: bot })
+    }
+    if (clean.length === 0) clean.push({ yTopPct: 0, yBottomPct: 1 })
+
+    const { width, height } = await probeImageDimensions(stripPaths[s])
+    onProgress?.({
+      phase: 'ai-crop',
+      i: s + 1,
+      total: stripPaths.length,
+      msg: `Cắt page ${s + 1}/${stripPaths.length} (${clean.length} panel)`
+    })
+    for (const bb of clean) {
+      const yTop = Math.max(0, Math.floor(bb.yTopPct * height))
+      const yBot = Math.min(height, Math.ceil(bb.yBottomPct * height))
+      const cropH = yBot - yTop
+      if (cropH < 50) continue
+      panelIdx++
+      const outPath = path.join(outDir, `panel_${String(panelIdx).padStart(3, '0')}.jpg`)
+      await cropVertical(stripPaths[s], yTop, cropH, outPath, opts.outputQuality || 3)
+      panelPaths.push(outPath)
+      allBboxes.push({
+        panelIdx,
+        sourceStrip: s,
+        sourcePage: path.basename(stripPaths[s]),
+        yTopPct: bb.yTopPct,
+        yBottomPct: bb.yBottomPct,
+        yTopPx: yTop,
+        yBottomPx: yBot,
+        width,
+        height
+      })
+    }
+  }
+
+  fs.writeFileSync(path.join(outDir, '_meta.json'), JSON.stringify({
+    version: 2,
+    method: 'ai-vision-batch',
+    chunks: totalChunks,
+    batchSize: BATCH_SIZE,
+    splitAt: new Date().toISOString(),
+    sourceStrips: stripPaths.length,
+    totalPanels: panelPaths.length,
+    bboxes: allBboxes
+  }, null, 2))
+
+  return {
+    panelPaths,
+    panelCount: panelPaths.length,
+    sourceStrips: stripPaths.length,
+    method: 'ai-vision-batch'
+  }
+}
+
+/**
+ * AI per-strip variant — kept for reference / fallback if batch mode
+ * exceeds API limits. Each strip = 1 call. Slower but predictable.
  */
 async function splitChapterPanelsAI({ stripPaths, outDir, onProgress, opts = {} }) {
   if (!Array.isArray(stripPaths) || stripPaths.length === 0) {
@@ -476,6 +650,7 @@ async function splitChapterPanelsAI({ stripPaths, outDir, onProgress, opts = {} 
 module.exports = {
   splitChapterPanels,
   splitChapterPanelsAI,
+  splitChapterPanelsAIBatch,
   detectPanelsViaAI,
   vstackImages,
   readRowBrightness,

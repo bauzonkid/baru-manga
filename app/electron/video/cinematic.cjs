@@ -544,8 +544,95 @@ async function overlaySubtitleOnVideo(opts) {
   })
 }
 
+/**
+ * Render a segment as a vertical scroll/pan over the ghép of selected
+ * strip images (manhwa-scrolling style). AI picks 1+ strips for the
+ * segment; tool vstacks them then ffmpeg vertically pans from top to
+ * bottom over the audio duration.
+ *
+ * If only 1 short strip is given (scaled height ≤ canvas height), no
+ * scroll — falls back to letterbox center.
+ */
+async function renderSegmentScroll(opts) {
+  const {
+    stripPaths,
+    audioPath,
+    outPath,
+    dims = { width: 1920, height: 1080 },
+    fps = 30
+  } = opts
+
+  if (!Array.isArray(stripPaths) || stripPaths.length === 0) {
+    throw new Error('renderSegmentScroll: stripPaths empty')
+  }
+  for (const p of stripPaths) {
+    if (!fs.existsSync(p)) throw new Error(`Strip not found: ${p}`)
+  }
+  if (!fs.existsSync(audioPath)) throw new Error(`Audio not found: ${audioPath}`)
+
+  const totalDur = await probeDuration(audioPath)
+  const { width: W, height: H } = dims
+  fs.mkdirSync(path.dirname(outPath), { recursive: true })
+
+  // Stage 1: vstack selected strips (or copy if just 1) → tall combined image
+  // Use the panelSplit module's vstackImages helper for consistency.
+  const tmpDir = path.join(path.dirname(outPath), `_tmp_${path.basename(outPath, '.mp4')}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const combinedPath = path.join(tmpDir, 'combined.png')
+  const panelSplit = require('./panelSplit.cjs')
+  await panelSplit.vstackImages(stripPaths, combinedPath)
+
+  const { width: combW, height: combH } = await panelSplit.probeImageDimensions(combinedPath)
+  // Scale combined to canvas width keeping aspect. Compute resulting height.
+  const scaledH = Math.round(combH * (W / combW))
+
+  let videoFilter
+  if (scaledH <= H) {
+    // Image fits in canvas — static letterbox center, no scroll
+    videoFilter = `scale=${W}:-1:flags=lanczos,pad=${W}:${H}:0:(oh-ih)/2:color=black,format=yuv420p`
+  } else {
+    // Scroll from y=0 → y=(scaledH-H) linearly over totalDur seconds
+    // ffmpeg crop expr: y='min(t * (scaledH-H) / totalDur, scaledH-H)'
+    const yExpr = `min(t*(${scaledH}-${H})/${totalDur},${scaledH}-${H})`
+    videoFilter = `scale=${W}:-1:flags=lanczos,crop=${W}:${H}:0:'${yExpr}',format=yuv420p`
+  }
+
+  console.log(`[renderSegmentScroll] ${stripPaths.length} strips, audio ${totalDur.toFixed(2)}s, combined ${combW}×${combH} → scaled ${W}×${scaledH}, mode=${scaledH <= H ? 'static' : 'scroll'}, out=${path.basename(outPath)}`)
+
+  const args = [
+    '-y',
+    '-loop', '1', '-framerate', String(fps), '-t', String(totalDur), '-i', combinedPath,
+    '-i', audioPath,
+    '-vf', videoFilter,
+    '-r', String(fps),
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k',
+    '-shortest',
+    outPath
+  ]
+
+  await new Promise((resolve, reject) => {
+    const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
+    let stderr = ''
+    proc.stderr.on('data', d => { stderr += d.toString() })
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`renderSegmentScroll exit ${code}\n${stderr.slice(-1500)}`))
+      if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
+        return reject(new Error('renderSegmentScroll output missing/tiny'))
+      }
+      resolve()
+    })
+    proc.on('error', reject)
+  })
+
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+
+  return { path: outPath, duration: totalDur, strips: stripPaths.length }
+}
+
 module.exports = {
   renderSegmentClip,
+  renderSegmentScroll,
   concatClips,
   probeDuration,
   resolveFfmpeg,

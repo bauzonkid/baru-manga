@@ -119,8 +119,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
       const label = info.phase === 'concat' ? 'Ghép strip...'
         : info.phase === 'detect' ? 'Phát hiện gap...'
         : info.phase === 'crop' ? `Cắt panels ${info.i || 0}/${info.total || '?'}`
-        : info.phase === 'ai-detect' ? `AI đọc page ${info.i || 0}/${info.total || '?'}`
-        : info.phase === 'ai-crop' ? `Cắt panels từ page ${info.i || 0}/${info.total || '?'}`
+        : info.phase === 'ai-detect' ? `AI nhận chunk ${info.i || 0}/${info.total || '?'}`
+        : info.phase === 'ai-crop' ? `Cắt local page ${info.i || 0}/${info.total || '?'}`
         : info.phase
       setSplitPhase(prev => new Map(prev).set(activeSplitChId, info.msg || label))
     })
@@ -1458,8 +1458,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                         style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
                         title="AI: Gemini Vision đọc bbox panels (chính xác hơn, ~$0.005/page). CV: whitespace detection (free, đôi khi miss)."
                       >
-                        <option value="ai">🤖 AI Vision (recommended)</option>
-                        <option value="cv">⚙ CV whitespace (free)</option>
+                        <option value="ai">🤖 AI Vision batch (recommended)</option>
+                        <option value="cv">⚙ CV whitespace (no AI)</option>
                       </select>
                       <button
                         onClick={splitPanelsForAllSelected}
