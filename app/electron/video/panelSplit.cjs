@@ -42,29 +42,33 @@ function probeImageDimensions(imagePath) {
 }
 
 /**
- * Vertically concat N images into one tall image using ffmpeg vstack.
+ * Vertically concat N images using ffmpeg vstack.
  *
- * Output MUST be PNG when total height could exceed 65535px (MJPEG/JPEG
- * hard limit). For a 79-page manga at 1429px each ≈ 113000px > limit.
- * Caller passes a `.png` outPath; encoder is auto-selected.
- *
- * vstack requires equal widths; we scale all inputs to a common (max) width.
+ * Returns `{ commonWidth, scaledHeights[] }` so the caller can compute
+ * each page strip's boundary Y in the combined image — those boundaries
+ * are guaranteed cut points even if the whitespace detector misses subtle
+ * gaps between adjacent strips.
  */
 async function vstackImages(imagePaths, outPath, opts = {}) {
   if (imagePaths.length === 0) throw new Error('vstackImages: no inputs')
   if (imagePaths.length === 1) {
     fs.copyFileSync(imagePaths[0], outPath)
-    return
+    const { width, height } = await probeImageDimensions(outPath)
+    return { commonWidth: width, scaledHeights: [height] }
   }
 
   let maxW = 0
-  let totalH = 0
+  const origDims = []
   for (const p of imagePaths) {
-    const { width, height } = await probeImageDimensions(p)
-    if (width > maxW) maxW = width
-    totalH += height
+    const dim = await probeImageDimensions(p)
+    origDims.push(dim)
+    if (dim.width > maxW) maxW = dim.width
   }
   if (maxW === 0) throw new Error('vstackImages: max width is 0')
+
+  // scaledH per input after scale=maxW:-1 (keeps aspect)
+  const scaledHeights = origDims.map(d => Math.round(d.height * maxW / d.width))
+  const totalH = scaledHeights.reduce((a, b) => a + b, 0)
 
   console.log(`[vstackImages] ${imagePaths.length} inputs, common width=${maxW}, est total height=${totalH}, out=${path.basename(outPath)}`)
 
@@ -99,7 +103,7 @@ async function vstackImages(imagePaths, outPath, opts = {}) {
       if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
         return reject(new Error('vstack produced empty/tiny output'))
       }
-      resolve()
+      resolve({ commonWidth: maxW, scaledHeights })
     })
     proc.on('error', reject)
   })
@@ -222,24 +226,47 @@ async function splitChapterPanels({ stripPaths, outDir, onProgress, opts = {} })
   }
   fs.mkdirSync(outDir, { recursive: true })
 
-  // Stage 1: vstack all strips into one tall image — PNG output because
-  // a 79-page chapter easily exceeds JPEG's 65535px height limit.
+  // Stage 1: vstack all strips into one tall PNG (JPEG max 65535px height
+  // hard limit; combined easily exceeds for 50+ page chapters).
   onProgress?.({ phase: 'concat', msg: `Ghép ${stripPaths.length} strip thành 1 ảnh dài...` })
   const combinedPath = path.join(outDir, '_combined.png')
-  await vstackImages(stripPaths, combinedPath)
+  const { scaledHeights } = await vstackImages(stripPaths, combinedPath)
 
-  // Stage 2: read per-row brightness, find gaps
+  // Page-boundary cuts: between adjacent strips in the vstack, the seam is
+  // a guaranteed cut point even if the whitespace detector misses subtle
+  // gaps. Compute cumulative scaled Y for each boundary.
+  const pageBoundaryYs = []
+  let cumY = 0
+  for (let i = 0; i < scaledHeights.length - 1; i++) {
+    cumY += scaledHeights[i]
+    pageBoundaryYs.push(cumY)
+  }
+
+  // Stage 2: read per-row brightness, find whitespace gaps within strips
   onProgress?.({ phase: 'detect', msg: 'Phát hiện khoảng trắng giữa panels...' })
   const rowData = await readRowBrightness(combinedPath, { scaleW: 100 })
   const gaps = findPanelBoundariesFromRows(rowData, {
-    whiteThreshold: opts.whiteThreshold || 240,
-    minGapPx: opts.minGapPx || 30
+    whiteThreshold: opts.whiteThreshold || 230,   // permissive — catch mildly noisy whitespace
+    minGapPx: opts.minGapPx || 15                  // many manga gaps are short (10–20px)
   })
 
-  // Build panel regions from gap midpoints
-  const splitYs = [0, ...gaps.map(g => g.midFull), rowData.fullH]
-  splitYs.sort((a, b) => a - b)
-  const minPanelPx = opts.minPanelPx || 100  // skip tiny slivers
+  console.log(`[splitChapterPanels] detected ${gaps.length} whitespace gaps + ${pageBoundaryYs.length} page boundaries`)
+
+  // Merge: page boundaries always cut; whitespace gaps add more cuts.
+  // Dedupe boundaries that are close (< 30px apart — likely same gap).
+  const allCuts = new Set()
+  for (const y of pageBoundaryYs) allCuts.add(y)
+  for (const g of gaps) allCuts.add(g.midFull)
+  const sortedCuts = [...allCuts].sort((a, b) => a - b)
+  const dedupedCuts = []
+  for (const y of sortedCuts) {
+    if (dedupedCuts.length === 0 || y - dedupedCuts[dedupedCuts.length - 1] >= 30) {
+      dedupedCuts.push(y)
+    }
+  }
+
+  const splitYs = [0, ...dedupedCuts, rowData.fullH]
+  const minPanelPx = opts.minPanelPx || 100
   const panelRegions = []
   for (let i = 0; i < splitYs.length - 1; i++) {
     const top = splitYs[i]
@@ -249,7 +276,6 @@ async function splitChapterPanels({ stripPaths, outDir, onProgress, opts = {} })
   }
 
   if (panelRegions.length === 0) {
-    // Fallback: keep combined image as the one panel
     panelRegions.push({ top: 0, height: rowData.fullH })
   }
 
@@ -267,16 +293,20 @@ async function splitChapterPanels({ stripPaths, outDir, onProgress, opts = {} })
   // Cleanup combined image
   try { fs.unlinkSync(combinedPath) } catch {}
 
-  // Persist metadata
   fs.writeFileSync(path.join(outDir, '_meta.json'), JSON.stringify({
     version: 1,
     splitAt: new Date().toISOString(),
     sourceStrips: stripPaths.length,
     totalPanels: panelPaths.length,
     panelRegions,
+    detection: {
+      whitespaceGaps: gaps.length,
+      pageBoundaries: pageBoundaryYs.length,
+      finalCuts: dedupedCuts.length
+    },
     settings: {
-      whiteThreshold: opts.whiteThreshold || 240,
-      minGapPx: opts.minGapPx || 30,
+      whiteThreshold: opts.whiteThreshold || 230,
+      minGapPx: opts.minGapPx || 15,
       minPanelPx: opts.minPanelPx || 100
     }
   }, null, 2))
