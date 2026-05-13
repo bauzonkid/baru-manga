@@ -163,6 +163,11 @@ interface Api {
     upsertChapter: (workspaceId: string, chapter: any) => Promise<IpcResult<any>>
     removeChapter: (workspaceId: string, chapterId: string) => Promise<IpcResult<any>>
     scanPages: (workspaceId: string, chapters: { id: string; number: string }[]) => Promise<IpcResult<Record<string, string[]>>>
+    scanRenders: (workspaceId: string) => Promise<IpcResult<{
+      base: { outPath: string; bytes: number } | null
+      timings: { startSec: number; endSec: number; text: string; chapterIdx?: number; chapterSlug?: string; segmentIdx?: number; panelStart?: number; panelEnd?: number }[] | null
+      final: { outPath: string; bytes: number } | null
+    }>>
     saveSegments: (workspaceId: string, chapterSlug: string, segments: VoiceoverSegment[]) => Promise<IpcResult<{ path: string }>>
     loadSegments: (workspaceId: string, chapters: { id: string; number: string }[]) => Promise<IpcResult<Record<string, VoiceoverSegment[]>>>
   }

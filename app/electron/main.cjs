@@ -288,6 +288,52 @@ ipcMain.handle('chapter:openDownloadsFolder', async (_e, { workspaceId, mangaSlu
 // Download chapter pages. With `workspaceId`, files land inside the workspace
 // folder (everything for one manga in one place). Without, legacy path under
 // downloads/<mSlug>/<cSlug>/ — kept for backward compat.
+// Scan workspace videos/ for already-rendered MP4s + their timings JSON.
+// Returns latest base render (no "withsub" in name) and latest final render
+// so Studio can resume Step 6/7 across app restart.
+ipcMain.handle('workspace:scanRenders', async (_e, { workspaceId }) => {
+  try {
+    if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
+    const videosDir = path.join(workspace.workspaceDir(app.getPath('userData'), workspaceId), 'videos')
+    if (!fs.existsSync(videosDir)) return { ok: true, data: { base: null, final: null, timings: null } }
+    const files = fs.readdirSync(videosDir)
+
+    const baseList = []
+    const finalList = []
+    for (const f of files) {
+      if (!f.endsWith('.mp4')) continue
+      const full = path.join(videosDir, f)
+      const stat = fs.statSync(full)
+      const info = { name: f, path: full, bytes: stat.size, mtime: stat.mtimeMs }
+      if (f.includes('withsub')) finalList.push(info)
+      else baseList.push(info)
+    }
+    baseList.sort((a, b) => b.mtime - a.mtime)
+    finalList.sort((a, b) => b.mtime - a.mtime)
+
+    const latestBase = baseList[0] || null
+    let timings = null
+    if (latestBase) {
+      const timingsPath = path.join(videosDir, path.basename(latestBase.name, '.mp4') + '.timings.json')
+      try {
+        const raw = fs.readFileSync(timingsPath, 'utf-8')
+        const j = JSON.parse(raw)
+        if (Array.isArray(j.timings)) timings = j.timings
+      } catch { /* timings file missing — render predates this scheme */ }
+    }
+    return {
+      ok: true,
+      data: {
+        base: latestBase ? { outPath: latestBase.path, bytes: latestBase.bytes } : null,
+        timings,
+        final: finalList[0] ? { outPath: finalList[0].path, bytes: finalList[0].bytes } : null
+      }
+    }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 // Persist voiceover segments to disk so they survive app restart.
 // Path: <ws>/voiceover/<chapterSlug>.json
 ipcMain.handle('workspace:saveSegments', async (_e, { workspaceId, chapterSlug, segments }) => {

@@ -160,26 +160,50 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     const chapterRefs = ws.chapters.map(c => ({ id: c.id, number: c.number }))
     Promise.all([
       window.api.workspace.scanPages(ws.id, chapterRefs),
-      window.api.workspace.loadSegments(ws.id, chapterRefs)
-    ]).then(([pagesRes, segRes]) => {
+      window.api.workspace.loadSegments(ws.id, chapterRefs),
+      window.api.workspace.scanRenders(ws.id)
+    ]).then(([pagesRes, segRes, rendersRes]) => {
       if (!mounted) return
       const pathsMap = pagesRes.ok ? new Map(Object.entries(pagesRes.data)) : new Map<string, string[]>()
       const segsMap = segRes.ok ? new Map(Object.entries(segRes.data)) : new Map<string, VoiceoverSegment[]>()
       setLocalPaths(pathsMap)
       setSegments(segsMap)
 
-      // Auto-select chapters with downloaded pages or saved segments —
-      // those are the ones the user was working on.
+      // Restore base render + timings + final from disk so Step 6/7 unlock
+      // across app restart.
+      let hasBaseRender = false
+      let hasFinalRender = false
+      if (rendersRes.ok && rendersRes.data) {
+        if (rendersRes.data.base) {
+          setRenderOutput({ outPath: rendersRes.data.base.outPath, bytes: rendersRes.data.base.bytes })
+          hasBaseRender = true
+        } else {
+          setRenderOutput(null)
+        }
+        if (Array.isArray(rendersRes.data.timings)) {
+          setRenderTimings(rendersRes.data.timings)
+        } else {
+          setRenderTimings(null)
+        }
+        if (rendersRes.data.final) {
+          setFinalOutput({ outPath: rendersRes.data.final.outPath, srtPath: '', bytes: rendersRes.data.final.bytes })
+          hasFinalRender = true
+        } else {
+          setFinalOutput(null)
+        }
+      }
+
+      // Auto-select chapters with downloaded pages or saved segments
       const completed = new Set<string>()
       for (const [chId] of segsMap) completed.add(chId)
       for (const [chId] of pathsMap) completed.add(chId)
       if (completed.size > 0) setSelectedChapters(completed)
 
-      // Resume at the highest-progressed step. Skip auto-advance if user
-      // has already navigated past Step 2 (don't yank them back/forward
-      // mid-session).
+      // Resume at highest-progressed step. Skip if user navigated past 2.
       setActiveStep(prev => {
         if (prev !== 1 && prev !== 2) return prev
+        if (hasFinalRender) return 7           // final MP4 với sub
+        if (hasBaseRender) return 7            // base done → ready for sub step
         if (segsMap.size > 0) return 4         // has voiceover script
         if (pathsMap.size > 0) return 3        // has downloaded pages
         return prev                            // stay at 2 (chapter picker)
