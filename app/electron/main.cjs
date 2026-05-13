@@ -1,0 +1,1226 @@
+// Silence Electron's "Insecure Content-Security-Policy / webSecurity disabled /
+// allowRunningInsecureContent" dev warnings in DevTools console. These are
+// intentional trade-offs for loading manga CDN images from any origin + file://
+// local panels — packaged builds won't show them anyway.
+process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true'
+
+const { app, BrowserWindow, ipcMain, dialog, net, session, shell } = require('electron')
+const path = require('path')
+const fs = require('fs')
+const ttsCache = require('./video/cache.cjs')
+const cinematic = require('./video/cinematic.cjs')
+const license = require('./license.cjs')
+const workspace = require('./workspace.cjs')
+
+let mainWindow = null
+
+// Maps image CDN host → which Referer to spoof, so <img src="..."> tags
+// in the renderer don't get blocked by hotlink protection. Populated when
+// a chapter is opened (we know the page URL → origin).
+const refererMap = new Map()
+
+const DEV_URL = process.env.VITE_DEV_SERVER_URL
+const PLUGINS_DIR = path.join(__dirname, 'plugins')
+
+const plugins = new Map()
+
+// Plugin loader. Loads from two locations:
+//   1. Built-in: `app/electron/plugins/*.cjs` (ships with app)
+//   2. User:     `<userData>/plugins/*.cjs` (user-authored adapters per site)
+// User plugins override built-in if same `id`. Files ending `.example` are
+// treated as templates and skipped.
+function loadPluginsFromDir(dir, label) {
+  if (!dir || !fs.existsSync(dir)) return 0
+  let count = 0
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith('.cjs')) continue
+    if (file.endsWith('.example.cjs') || file.startsWith('_')) continue
+    const full = path.join(dir, file)
+    try {
+      // Bust require cache so user plugins reload cleanly on app restart
+      delete require.cache[require.resolve(full)]
+      const plugin = require(full)
+      if (plugin && plugin.id) {
+        plugins.set(plugin.id, plugin)
+        count++
+      }
+    } catch (e) {
+      console.error(`Failed to load ${label || 'plugin'} ${file}:`, e.message)
+    }
+  }
+  return count
+}
+
+// Load built-in plugins at module init so they're available before any IPC.
+loadPluginsFromDir(PLUGINS_DIR, 'built-in plugin')
+
+function userPluginsDir() {
+  try { return path.join(app.getPath('userData'), 'plugins') } catch { return null }
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 1100,
+    minHeight: 700,
+    backgroundColor: '#0a0a0b',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: false // allow remote image loads from MangaDex CDN + file:// for local
+    }
+  })
+
+  if (DEV_URL) {
+    mainWindow.loadURL(DEV_URL)
+    // DevTools off by default. Set BARU_DEVTOOLS=1 to open it (F12 also works
+    // any time — Electron's default Ctrl+Shift+I shortcut still toggles it).
+    if (process.env.BARU_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools({ mode: 'detach' })
+    }
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  }
+
+  // Spoof Referer for image requests so manga CDNs don't 403 us.
+  // Order of preference: explicit per-host override (set by chapter:registerReferer
+  // when a chapter is opened) → the image's own origin (works for CDNs that
+  // either don't check Referer, or accept same-origin requests).
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
+    { urls: ['*://*/*'] },
+    (details, callback) => {
+      const isImage = details.resourceType === 'image' || /\.(jpe?g|png|webp|gif|avif|bmp)(\?|#|$)/i.test(details.url)
+      if (!isImage) return callback({ requestHeaders: details.requestHeaders })
+      try {
+        const host = new URL(details.url).host
+        const headers = { ...details.requestHeaders }
+        const override = refererMap.get(host)
+        if (override) {
+          headers.Referer = override
+        } else {
+          headers.Referer = new URL(details.url).origin + '/'
+        }
+        callback({ requestHeaders: headers })
+      } catch {
+        callback({ requestHeaders: details.requestHeaders })
+      }
+    }
+  )
+
+  mainWindow.on('closed', () => { mainWindow = null })
+}
+
+app.whenReady().then(() => {
+  // Now that userData path is resolved, also load user-authored plugins.
+  // mkdir is idempotent — creates <userData>/plugins on first run.
+  const dir = userPluginsDir()
+  if (dir) {
+    try { fs.mkdirSync(dir, { recursive: true }) } catch {}
+    const n = loadPluginsFromDir(dir, 'user plugin')
+    if (n > 0) console.log(`Loaded ${n} user plugin(s) from ${dir}`)
+  }
+  createWindow()
+})
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+
+// ----- Plugin IPC -----
+
+ipcMain.handle('plugins:list', () =>
+  [...plugins.values()].map(p => ({
+    id: p.id,
+    name: p.name,
+    capabilities: p.capabilities || { search: true, openLocal: false },
+    needsApiKey: false
+  }))
+)
+
+ipcMain.handle('plugins:search', async (_e, { pluginId, query }) => {
+  const p = plugins.get(pluginId)
+  if (!p) return { ok: false, error: `Plugin not found: ${pluginId}` }
+  try {
+    return { ok: true, data: await p.search(query) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('plugins:openLocal', async (_e, { pluginId }) => {
+  const p = plugins.get(pluginId)
+  if (!p || !p.openLocal) return { ok: false, error: 'Plugin không hỗ trợ openLocal' }
+  try {
+    const result = await p.openLocal(mainWindow)
+    return { ok: true, data: result }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('plugins:getManga', async (_e, { pluginId, id }) => {
+  const p = plugins.get(pluginId)
+  if (!p) return { ok: false, error: `Plugin not found: ${pluginId}` }
+  try {
+    return { ok: true, data: await p.getManga(id) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('plugins:getChapters', async (_e, { pluginId, mangaId, opts }) => {
+  const p = plugins.get(pluginId)
+  if (!p) return { ok: false, error: `Plugin not found: ${pluginId}` }
+  try {
+    return { ok: true, data: await p.getChapters(mangaId, opts) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('plugins:getPages', async (_e, { pluginId, chapterId }) => {
+  const p = plugins.get(pluginId)
+  if (!p) return { ok: false, error: `Plugin not found: ${pluginId}` }
+  try {
+    return { ok: true, data: await p.getPages(chapterId) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// Renderer calls this after loading a chapter's pages: it tells main process
+// which Referer to send for each image CDN host. Image CDNs that hotlink-check
+// (nettruyen, manhuagui...) require the referer of the host page, not the
+// renderer's localhost origin.
+ipcMain.handle('chapter:registerReferer', async (_e, { pageUrls, referer }) => {
+  if (!Array.isArray(pageUrls) || !referer) return { ok: false }
+  const hosts = new Set()
+  for (const u of pageUrls) {
+    try { hosts.add(new URL(u).host) } catch { /* skip invalid */ }
+  }
+  for (const h of hosts) refererMap.set(h, referer)
+  return { ok: true, data: { hosts: [...hosts], referer } }
+})
+
+// Download all pages of a chapter to disk under <user-pick-or-default>/<slug>/<chapter>/page_001.ext
+// Returns { dir, localPaths } so renderer can later use file:// URLs or feed to ffmpeg.
+function safeSlug(s) {
+  return String(s || '')
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '') // strip diacritics
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+    .slice(0, 80) || 'chapter'
+}
+
+function extFromUrl(u, fallback = 'jpg') {
+  const m = u.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
+  return m ? m[1].toLowerCase() : fallback
+}
+
+/**
+ * Shared helper: downloads a list of image URLs to a directory using Electron's
+ * net.request (handles hotlink referer). Resume-aware (skip files >1KB).
+ * Used by both `chapter:download` IPC + `video:render` orchestrator.
+ */
+async function downloadPagesToDisk({ pageUrls, referer, dir, onProgress }) {
+  fs.mkdirSync(dir, { recursive: true })
+  const localPaths = []
+  for (let i = 0; i < pageUrls.length; i++) {
+    const url = pageUrls[i]
+    const ext = extFromUrl(url, 'jpg')
+    const fname = `page_${String(i + 1).padStart(3, '0')}.${ext}`
+    const target = path.join(dir, fname)
+
+    try {
+      const st = fs.statSync(target)
+      if (st.size > 1000) {
+        localPaths.push(target)
+        onProgress?.({ i: i + 1, total: pageUrls.length, file: fname, cached: true })
+        continue
+      }
+    } catch { /* not present */ }
+
+    const buf = await new Promise((resolve, reject) => {
+      const req = net.request({ method: 'GET', url, redirect: 'follow' })
+      req.setHeader('User-Agent',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
+      if (referer) req.setHeader('Referer', referer)
+      const chunks = []
+      req.on('response', res => {
+        if (res.statusCode >= 400) {
+          reject(new Error(`Page ${i + 1} → HTTP ${res.statusCode}`))
+          return
+        }
+        res.on('data', c => chunks.push(c))
+        res.on('end', () => resolve(Buffer.concat(chunks)))
+        res.on('error', reject)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    fs.writeFileSync(target, buf)
+    localPaths.push(target)
+    onProgress?.({ i: i + 1, total: pageUrls.length, file: fname, cached: false })
+  }
+  return localPaths
+}
+
+ipcMain.handle('chapter:download', async (evt, { pageUrls, referer, mangaSlug, chapterSlug }) => {
+  if (!Array.isArray(pageUrls) || pageUrls.length === 0) {
+    return { ok: false, error: 'Không có URL ảnh để tải' }
+  }
+  try {
+    const base = path.join(app.getPath('userData'), 'downloads')
+    const mSlug = safeSlug(mangaSlug || 'untitled-manga')
+    const cSlug = safeSlug(chapterSlug || 'untitled-chapter')
+    const dir = path.join(base, mSlug, cSlug)
+    const localPaths = await downloadPagesToDisk({
+      pageUrls, referer, dir,
+      onProgress: info => evt.sender.send('chapter:download:progress', info)
+    })
+    return { ok: true, data: { dir, localPaths } }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('plugins:openByUrl', async (_e, { url }) => {
+  for (const p of plugins.values()) {
+    if (typeof p.parseUrl !== 'function') continue
+    const parsed = p.parseUrl(url)
+    if (!parsed) continue
+    try {
+      if (parsed.kind === 'manga') {
+        const manga = await p.getManga(parsed.id)
+        return { ok: true, data: { pluginId: p.id, kind: 'manga', manga } }
+      }
+      if (parsed.kind === 'chapter') {
+        if (typeof p.getChapter !== 'function') {
+          return { ok: false, error: `Plugin ${p.id} chưa hỗ trợ chapter URL` }
+        }
+        const info = await p.getChapter(parsed.id)
+        let manga = null
+        if (info.mangaId) {
+          try { manga = await p.getManga(info.mangaId) } catch { /* fall through */ }
+        }
+        return { ok: true, data: { pluginId: p.id, kind: 'chapter', manga, chapter: info.chapter } }
+      }
+    } catch (e) {
+      return { ok: false, error: e.message }
+    }
+  }
+  return { ok: false, error: 'Không nhận diện được URL (chỉ hỗ trợ mangadex.org/title/... hoặc /chapter/...)' }
+})
+
+// Open user plugins folder in OS file explorer. Creates the folder first
+// so even on a fresh install the user lands somewhere they can drop files.
+ipcMain.handle('plugins:openUserFolder', async () => {
+  try {
+    const dir = path.join(app.getPath('userData'), 'plugins')
+    fs.mkdirSync(dir, { recursive: true })
+    // Copy the template + doc on first open so the user has reference files
+    // sitting next to where they'll create their own adapters.
+    const builtInTemplate = path.join(PLUGINS_DIR, '_template.example.cjs')
+    const builtInDoc = path.join(PLUGINS_DIR, 'PLUGINS.md')
+    for (const src of [builtInTemplate, builtInDoc]) {
+      try {
+        const dst = path.join(dir, path.basename(src))
+        if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst)
+      } catch {}
+    }
+    const err = await shell.openPath(dir)
+    if (err) return { ok: false, error: err }
+    return { ok: true, data: { dir } }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// ----- Image proxy (so renderer can display via blob to avoid CORS) -----
+
+function sniffMimeFromBuffer(buf) {
+  if (!buf || buf.length < 12) return ''
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg'
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif'
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp'
+  return ''
+}
+
+ipcMain.handle('image:fetch', async (_e, { url, referer }) => {
+  // Pick referer:
+  //   1. explicit `referer` from renderer (page URL that hosted the image)
+  //   2. fallback to the image URL's own origin
+  // Hardcoding mangadex.org broke every other site (e.g. nettruyen) because
+  // CDNs check the Referer header against their hotlink allowlist.
+  let ref = referer
+  if (!ref) {
+    try { ref = new URL(url).origin + '/' } catch { ref = '' }
+  }
+  return new Promise((resolve, reject) => {
+    const req = net.request({ method: 'GET', url, redirect: 'follow' })
+    req.setHeader('User-Agent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
+    if (ref) req.setHeader('Referer', ref)
+    const chunks = []
+    req.on('response', res => {
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks)
+        // Electron's net headers can be string OR string[] depending on version.
+        // `?.[0]` on a string returns the first CHARACTER (e.g. "i" from "image/jpeg"),
+        // which made Gemini reject with: Unsupported MIME type: i
+        const ctRaw = res.headers['content-type'] || res.headers['Content-Type']
+        const ct = Array.isArray(ctRaw) ? ctRaw[0] : (typeof ctRaw === 'string' ? ctRaw : '')
+        const cleanCt = (ct.split(';')[0] || '').trim() || sniffMimeFromBuffer(buf) || 'image/jpeg'
+        resolve({
+          ok: true,
+          contentType: cleanCt,
+          base64: buf.toString('base64')
+        })
+      })
+      res.on('error', err => reject(err))
+    })
+    req.on('error', err => reject(err))
+    req.end()
+  }).catch(err => ({ ok: false, error: err.message }))
+})
+
+// ----- AI Review via 9router (OpenAI-compatible) -----
+//
+// Endpoint priority:
+//   1. NINEROUTER_BASE env  (Baru-Manga.bat sets this to localhost for dev)
+//   2. Default: yohomin tunnel — sếp's hosted 9router proxy at yohomin.com
+//      User installations don't run a local 9router, so production points
+//      at the tunnel which sếp pays for. Same default as Baru-YTB.
+//      To override per-user (e.g. their own Gemini key direct), Settings
+//      UI can write to a persisted config that we load on startup (TODO).
+
+const ROUTER_BASE = process.env.NINEROUTER_BASE || 'https://yohomin.com/v1'
+
+// Vision-capable model preference order. We start with the smallest free-tier
+// Gemini and fall back to bigger / older variants if the chosen model is rate
+// limited (HTTP 429). Order picked from /v1/models on 2026-05-12.
+const VISION_FALLBACK = [
+  'gemini/gemini-3.1-flash-lite-preview',
+  'gemini/gemini-3-flash-preview',
+  'gemini/gemini-2.0-flash-lite',
+  'gemini/gemini-3.1-pro-preview',
+  'openai/gpt-4o-mini',
+  'openai/gpt-4o'
+]
+
+function reviewPrompt(language, style, mangaTitle, chapterTitle) {
+  const langName = { vi: 'Vietnamese', th: 'Thai', en: 'English', ko: 'Korean', ja: 'Japanese' }[language] || 'English'
+  const ctx = []
+  if (mangaTitle) ctx.push(`Manga: ${mangaTitle}`)
+  if (chapterTitle) ctx.push(`Chapter: ${chapterTitle}`)
+  const ctxLine = ctx.length ? ctx.join(' • ') + '\n\n' : ''
+
+  if (style === 'review') {
+    return `${ctxLine}You are an experienced manga critic. Analyze the chapter pages provided as images and write a critical review in ${langName}.
+
+Cover these sections (use clear headings in ${langName}):
+1. **Plot summary** — what happens in this chapter (concise, 3-5 sentences).
+2. **Character moments** — name the characters you recognize from the images and dialogue. What did they do? What does it reveal?
+3. **Art & pacing** — panel layout, action flow, expressions. Strong moments vs weak moments.
+4. **Critique** — your honest opinion. Is this chapter strong or weak? Why? Score it /10.
+5. **What to expect next** — 1-2 sentences predicting the next chapter.
+
+Tone: a knowledgeable reviewer with taste, not a corporate summary. Have opinions. Be specific. Quote dialogue when impactful.`
+  }
+  return `${ctxLine}You are a manga recap narrator (style: HBO documentary / movie trailer). Watch the chapter pages and write a dramatic recap in ${langName}.
+
+Rules:
+- Identify characters by name from dialogue and visual cues. Use names, not "the man / the woman".
+- Capture the story flow — don't describe panels one by one.
+- Cinematic tone. Vivid verbs. Short punchy sentences mixed with longer flowing ones.
+- Include 1-2 impactful direct quotes from characters.
+- Output as flowing prose (no bullet points).
+- Keep it under 400 words for a typical chapter.`
+}
+
+ipcMain.handle('ai:ping', async () => {
+  try {
+    const res = await fetch(`${ROUTER_BASE}/models`, { signal: AbortSignal.timeout(3000) })
+    if (!res.ok) return { ok: false, error: `9router ${res.status}` }
+    const data = await res.json()
+    return { ok: true, data: { count: (data.data || []).length, base: ROUTER_BASE } }
+  } catch (e) {
+    return { ok: false, error: `9router không phản hồi tại ${ROUTER_BASE} (${e.message})` }
+  }
+})
+
+ipcMain.handle('ai:listModels', async () => {
+  try {
+    const res = await fetch(`${ROUTER_BASE}/models`, { signal: AbortSignal.timeout(5000) })
+    if (!res.ok) return { ok: false, error: `9router ${res.status}` }
+    const data = await res.json()
+    const all = (data.data || []).map(m => m.id)
+    // Filter to known-vision-capable models. Gemma + o1-mini + nano variants
+    // are text-only and would 400 on image inputs.
+    const visionCapable = all.filter(id =>
+      /^gemini\/gemini-(3|3\.1|2\.0)/.test(id) ||
+      /^openai\/gpt-4o/.test(id) ||
+      /^openai\/gpt-4-turbo/.test(id) ||
+      /^openai\/gpt-5(\.\d)?(-mini)?$/.test(id) ||
+      /^openai\/gpt-4\.1(-mini)?$/.test(id)
+    )
+    return { ok: true, data: { all, visionCapable } }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+async function callRouter(model, body) {
+  return fetch(`${ROUTER_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, model })
+  })
+}
+
+// Voiceover script prompt — asks the LLM to return a JSON array of segments
+// where each segment owns a contiguous panel range. Used by M4 to render
+// cinematic video: zoom/pan over the segment's panels while the segment's
+// audio plays, then advance.
+function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels) {
+  const langName = { vi: 'Vietnamese', th: 'Thai', en: 'English', ko: 'Korean', ja: 'Japanese' }[language] || 'English'
+  const ctx = []
+  if (mangaTitle) ctx.push(`Manga: ${mangaTitle}`)
+  if (chapterTitle) ctx.push(`Chapter: ${chapterTitle}`)
+  const ctxLine = ctx.length ? ctx.join(' • ') + '\n\n' : ''
+
+  return `${ctxLine}You are a manga recap narrator. Watch the ${totalPanels} chapter pages (provided as images in order) and produce a structured voiceover script in ${langName}.
+
+Output a JSON object exactly matching this schema (no markdown, no commentary):
+{
+  "segments": [
+    { "text": "<one sentence or short paragraph in ${langName}>", "panelStart": <0-based int>, "panelEnd": <0-based int, inclusive> },
+    ...
+  ]
+}
+
+Rules:
+- 5 to 15 segments total. Each segment maps to a CONTIGUOUS range of panels (no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}).
+- Each segment's text is 1-3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that panel range.
+- Voice style: HBO documentary / movie trailer narrator. Vivid verbs, dramatic but not over-the-top.
+- Use character names from dialogue/visuals when visible. Avoid "the man / the woman".
+- Sprinkle 1 impactful direct quote (in ${langName}) across the whole script.
+- Don't invent plot — describe what's actually shown.
+- panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
+
+Return ONLY the JSON object.`
+}
+
+ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, mangaTitle, chapterTitle }) => {
+  if (!Array.isArray(images) || images.length === 0) {
+    return { ok: false, error: 'Không có ảnh để gen script' }
+  }
+  // Send ALL panels (no sampling) so the AI labels segments using real panel
+  // indices that line up with the actual page sequence on disk. With sampling,
+  // the AI would label "panels 0-8" referring to its 10 visible images, and
+  // the renderer would have to map sample-space → real-space, which is fragile.
+  // Hard cap at 100 to keep request size reasonable.
+  const usePages = images.length > 100 ? sampleEvenly(images, 100) : images
+  const declaredPanels = usePages.length
+  const content = [{ type: 'text', text: voiceoverPrompt(language, mangaTitle, chapterTitle, declaredPanels) }]
+  for (const img of usePages) {
+    const mt = /^image\/(jpe?g|png|webp|gif|bmp|avif)$/i.test(img.mimeType || '') ? img.mimeType : 'image/jpeg'
+    content.push({ type: 'image_url', image_url: { url: `data:${mt};base64,${img.base64}` } })
+  }
+  const body = {
+    messages: [{ role: 'user', content }],
+    temperature: 0.7,
+    max_tokens: 4096,
+    response_format: { type: 'json_object' },
+    stream: false
+  }
+
+  const candidates = model ? [model, ...VISION_FALLBACK.filter(m => m !== model)] : VISION_FALLBACK
+  const tried = []
+  for (const m of candidates) {
+    try {
+      const res = await callRouter(m, body)
+      if (res.ok) {
+        const data = await res.json()
+        const text = data.choices?.[0]?.message?.content || ''
+        if (!text) { tried.push({ model: m, status: 'empty' }); continue }
+        let parsed
+        try {
+          parsed = JSON.parse(text)
+        } catch {
+          // Some models wrap JSON in ```json fences; strip them.
+          const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+          if (fenced) {
+            try { parsed = JSON.parse(fenced[1]) } catch { /* fall through */ }
+          }
+          if (!parsed) {
+            tried.push({ model: m, status: 'parse-fail', error: text.slice(0, 200) })
+            continue
+          }
+        }
+        const segments = Array.isArray(parsed.segments) ? parsed.segments : []
+        // Sanitize: ensure ints, contiguous, in range
+        const clean = []
+        let nextStart = 0
+        for (const s of segments) {
+          const start = Math.max(nextStart, Math.floor(Number(s.panelStart) || nextStart))
+          const end = Math.min(declaredPanels - 1, Math.max(start, Math.floor(Number(s.panelEnd) || start)))
+          const t = String(s.text || '').trim()
+          if (!t) continue
+          clean.push({ text: t, panelStart: start, panelEnd: end })
+          nextStart = end + 1
+          if (nextStart >= declaredPanels) break
+        }
+        // If last segment doesn't reach the final panel, extend it.
+        if (clean.length > 0 && clean[clean.length - 1].panelEnd < declaredPanels - 1) {
+          clean[clean.length - 1].panelEnd = declaredPanels - 1
+        }
+        if (clean.length === 0) {
+          tried.push({ model: m, status: 'no-valid-segments' })
+          continue
+        }
+        return {
+          ok: true,
+          data: {
+            segments: clean,
+            model: data.model || m,
+            pagesUsed: usePages.length,
+            pagesTotal: images.length,
+            tried
+          }
+        }
+      }
+      const errText = await res.text()
+      tried.push({ model: m, status: res.status, error: errText.slice(0, 200) })
+      if (res.status !== 429 && res.status < 500) {
+        return { ok: false, error: `${m} → ${res.status}: ${errText.slice(0, 300)}`, tried }
+      }
+    } catch (e) {
+      tried.push({ model: m, error: e.message })
+    }
+  }
+  return { ok: false, error: 'Tất cả models đều fail.', tried }
+})
+
+ipcMain.handle('ai:review', async (_e, { model, images, language, style, mangaTitle, chapterTitle, maxPages }) => {
+  if (!Array.isArray(images) || images.length === 0) {
+    return { ok: false, error: 'Không có ảnh để review' }
+  }
+
+  // Cap at 200 to avoid runaway requests; clamp min at 1.
+  const limit = Math.max(1, Math.min(Number(maxPages) || 60, 200))
+  const usePages = images.length > limit ? sampleEvenly(images, limit) : images
+  const content = [{ type: 'text', text: reviewPrompt(language, style, mangaTitle, chapterTitle) }]
+  for (const img of usePages) {
+    // Defensive: validate MIME or fall back. Stops "Unsupported MIME type: i"
+    // when upstream sent a malformed Content-Type.
+    const mt = /^image\/(jpe?g|png|webp|gif|bmp|avif)$/i.test(img.mimeType || '')
+      ? img.mimeType
+      : 'image/jpeg'
+    content.push({
+      type: 'image_url',
+      image_url: { url: `data:${mt};base64,${img.base64}` }
+    })
+  }
+  const body = {
+    messages: [{ role: 'user', content }],
+    temperature: 0.7,
+    max_tokens: 2048,
+    stream: false  // 9router defaults to SSE; force JSON response so res.json() works
+  }
+
+  const candidates = model ? [model, ...VISION_FALLBACK.filter(m => m !== model)] : VISION_FALLBACK
+  const tried = []
+  for (const m of candidates) {
+    try {
+      const res = await callRouter(m, body)
+      if (res.ok) {
+        const data = await res.json()
+        const text = data.choices?.[0]?.message?.content || ''
+        if (!text) {
+          tried.push({ model: m, status: 'empty' })
+          continue
+        }
+        return {
+          ok: true,
+          data: {
+            text,
+            model: data.model || m,
+            pagesUsed: usePages.length,
+            pagesTotal: images.length,
+            tried
+          }
+        }
+      }
+      const errText = await res.text()
+      tried.push({ model: m, status: res.status, error: errText.slice(0, 200) })
+      // On 429 / 5xx, try next model. On other 4xx, bail out — likely a code bug
+      // not worth burning through models for.
+      if (res.status !== 429 && res.status < 500) {
+        return { ok: false, error: `${m} → ${res.status}: ${errText.slice(0, 300)}`, tried }
+      }
+    } catch (e) {
+      tried.push({ model: m, error: e.message })
+    }
+  }
+  return { ok: false, error: 'Tất cả models đều fail (429 / lỗi). Check 9router dashboard.', tried }
+})
+
+function sampleEvenly(arr, n) {
+  if (arr.length <= n) return arr
+  const out = []
+  const step = (arr.length - 1) / (n - 1)
+  for (let i = 0; i < n; i++) out.push(arr[Math.round(i * step)])
+  return out
+}
+
+// ----- TTS via 9router (Gemini 2.5 TTS) -----
+// Endpoint: <base>/audio/speech (OpenAI-compatible)
+// Body: { model: 'gemini/gemini-2.5-flash-preview-tts/<voice>', input: '...', prompt?: '...' }
+// Auth: Bearer <api_key>
+// Response: WAV binary (RIFF...)
+// Pattern picked from Baru-YTB's baru_ytb/tts_gemini.py — voice tucks INTO
+// the model path, NOT a separate `voice` field (that field is ignored).
+
+const TTS_BYPASS_KEY = process.env.NINEROUTER_API_KEY
+  || process.env.BARU_9ROUTER_API_KEY
+  || 'sk-yohomin-9router-bypass'
+
+// Google's official voice demos. Hosted at:
+//   https://docs.cloud.google.com/static/text-to-speech/docs/audio/chirp3-hd-{slug}.wav
+// Slug is voice name lowercased, EXCEPT one Google typo: Aoede → aoeda.
+const VOICE_DEMO_BASE = 'https://docs.cloud.google.com/static/text-to-speech/docs/audio/'
+const VOICE_DEMO_SLUG_OVERRIDES = {
+  Aoede: 'aoeda'
+}
+function voiceDemoUrl(voiceKey) {
+  const slug = VOICE_DEMO_SLUG_OVERRIDES[voiceKey] || voiceKey.toLowerCase()
+  return `${VOICE_DEMO_BASE}chirp3-hd-${slug}.wav`
+}
+
+const TTS_VOICES = [
+  { key: 'Zephyr',        label: 'Zephyr — bright (female)' },
+  { key: 'Puck',          label: 'Puck — upbeat (male)' },
+  { key: 'Charon',        label: 'Charon — informative (male)' },
+  { key: 'Kore',          label: 'Kore — firm (female)' },
+  { key: 'Fenrir',        label: 'Fenrir — excitable (male)' },
+  { key: 'Leda',          label: 'Leda — youthful (female)' },
+  { key: 'Orus',          label: 'Orus — firm (male)' },
+  { key: 'Aoede',         label: 'Aoede — breezy (female)' },
+  { key: 'Callirrhoe',    label: 'Callirrhoe (female)' },
+  { key: 'Autonoe',       label: 'Autonoe (female)' },
+  { key: 'Enceladus',     label: 'Enceladus (male)' },
+  { key: 'Iapetus',       label: 'Iapetus (male)' },
+  { key: 'Umbriel',       label: 'Umbriel (male)' },
+  { key: 'Algieba',       label: 'Algieba (male)' },
+  { key: 'Despina',       label: 'Despina (female)' },
+  { key: 'Erinome',       label: 'Erinome (female)' },
+  { key: 'Algenib',       label: 'Algenib (male)' },
+  { key: 'Rasalgethi',    label: 'Rasalgethi (male)' },
+  { key: 'Laomedeia',     label: 'Laomedeia (female)' },
+  { key: 'Achernar',      label: 'Achernar (female)' },
+  { key: 'Alnilam',       label: 'Alnilam (male)' },
+  { key: 'Schedar',       label: 'Schedar (male)' },
+  { key: 'Gacrux',        label: 'Gacrux (female)' },
+  { key: 'Pulcherrima',   label: 'Pulcherrima (female)' },
+  { key: 'Achird',        label: 'Achird (male)' },
+  { key: 'Zubenelgenubi', label: 'Zubenelgenubi (male)' },
+  { key: 'Vindemiatrix',  label: 'Vindemiatrix (female)' },
+  { key: 'Sadachbia',     label: 'Sadachbia (male)' },
+  { key: 'Sadaltager',    label: 'Sadaltager (male)' },
+  { key: 'Sulafat',       label: 'Sulafat (female)' }
+]
+
+const TTS_MODELS = [
+  { key: 'gemini/gemini-2.5-flash-preview-tts', label: 'Gemini 2.5 Flash TTS (mặc định, nhanh)' },
+  { key: 'gemini/gemini-2.5-pro-preview-tts',   label: 'Gemini 2.5 Pro TTS (chất lượng cao, chậm)' }
+]
+
+ipcMain.handle('tts:meta', async () => ({
+  ok: true,
+  data: {
+    voices: TTS_VOICES.map(v => ({ ...v, demoUrl: voiceDemoUrl(v.key) })),
+    models: TTS_MODELS,
+    defaultVoice: 'Charon',
+    defaultModel: 'gemini/gemini-2.5-flash-preview-tts'
+  }
+}))
+
+/**
+ * Raw 9router /audio/speech call. Returns a Buffer of WAV bytes on success,
+ * or throws with a clear error message. Shared between `tts:speak` (single
+ * preview call) and `tts:speakBatch` (cached bulk render in M4).
+ */
+async function fetchTtsWav({ text, voice, model, language, stylePrompt }) {
+  const v = (voice || 'Charon').trim()
+  const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
+  const modelWithVoice = `${m.replace(/\/$/, '')}/${v}`
+  const payload = { model: modelWithVoice, input: text }
+  if (language && language.trim()) payload.language = language.trim()
+  if (stylePrompt && stylePrompt.trim()) payload.prompt = stylePrompt.trim()
+
+  const res = await fetch(`${ROUTER_BASE}/audio/speech`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${TTS_BYPASS_KEY}`
+    },
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok) {
+    const errText = await res.text()
+    throw new Error(`TTS HTTP ${res.status}: ${errText.slice(0, 300)}`)
+  }
+  const ab = await res.arrayBuffer()
+  const buf = Buffer.from(ab)
+  if (buf.slice(0, 4).toString('ascii') !== 'RIFF') {
+    throw new Error(`TTS không trả WAV (first 12 bytes: ${buf.slice(0, 12).toString('hex')})`)
+  }
+  return buf
+}
+
+ipcMain.handle('tts:speak', async (_e, { text, voice, model, stylePrompt, language, savePath }) => {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return { ok: false, error: 'Text rỗng' }
+  try {
+    const buf = await fetchTtsWav({ text: trimmed, voice, model, language, stylePrompt })
+    let writtenPath
+    if (savePath) {
+      fs.mkdirSync(path.dirname(savePath), { recursive: true })
+      fs.writeFileSync(savePath, buf)
+      writtenPath = savePath
+    }
+    return {
+      ok: true,
+      data: {
+        bytes: buf.length,
+        base64: buf.toString('base64'),
+        savedTo: writtenPath || null,
+        model: (model || 'gemini/gemini-2.5-flash-preview-tts').trim(),
+        voice: (voice || 'Charon').trim()
+      }
+    }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+/**
+ * Bulk TTS render for video pipeline. Each segment is keyed by SHA256 hash of
+ * (text|voice|model|language); cache hits skip the network call. Streams
+ * progress events via `tts:speakBatch:progress` so the renderer can show
+ * a live count of done/cached/total.
+ *
+ * Returns: { segments: [{ index, panelStart, panelEnd, text, path, hash, bytes, cached }] }
+ */
+ipcMain.handle('tts:speakBatch', async (evt, { segments, voice, model, language }) => {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return { ok: false, error: 'Không có segments để render TTS' }
+  }
+  const v = (voice || 'Charon').trim()
+  const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
+  const lang = (language || 'en-US').trim()
+  const baseDir = path.join(app.getPath('userData'), 'video-cache')
+
+  const out = []
+  let cacheHits = 0
+  let networkCalls = 0
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i] || {}
+    const text = String(seg.text || '').trim()
+    if (!text) continue
+    try {
+      const result = await ttsCache.getOrFetch(
+        { text, voice: v, model: m, language: lang, baseDir },
+        () => fetchTtsWav({ text, voice: v, model: m, language: lang })
+      )
+      if (result.cached) cacheHits++; else networkCalls++
+      out.push({
+        index: i,
+        panelStart: Number(seg.panelStart) || 0,
+        panelEnd: Number(seg.panelEnd) || 0,
+        text,
+        path: result.path,
+        hash: result.hash,
+        bytes: result.bytes,
+        cached: result.cached
+      })
+      evt.sender.send('tts:speakBatch:progress', {
+        i: i + 1,
+        total: segments.length,
+        cached: result.cached,
+        hash: result.hash,
+        bytes: result.bytes
+      })
+    } catch (e) {
+      return { ok: false, error: `Segment #${i + 1}: ${e.message}`, partial: out }
+    }
+  }
+  return {
+    ok: true,
+    data: {
+      segments: out,
+      baseDir,
+      cacheHits,
+      networkCalls,
+      total: segments.length
+    }
+  }
+})
+
+ipcMain.handle('tts:cacheStats', async () => {
+  const baseDir = path.join(app.getPath('userData'), 'video-cache')
+  return { ok: true, data: ttsCache.stats(baseDir) }
+})
+
+ipcMain.handle('tts:cacheClear', async () => {
+  const baseDir = path.join(app.getPath('userData'), 'video-cache')
+  return { ok: true, data: { removed: ttsCache.clear(baseDir) } }
+})
+
+// ----- M4.3 Video Render Orchestrator -----
+// End-to-end: download pages → TTS batch (cached) → per-segment cinematic clip
+// → concat → final MP4. Streams `video:render:progress` events at every phase.
+
+ipcMain.handle('video:render', async (evt, opts) => {
+  const {
+    pageUrls,
+    referer,
+    segments,
+    voice,
+    model,
+    language,
+    mangaSlug,
+    chapterSlug
+  } = opts || {}
+
+  if (!Array.isArray(pageUrls) || pageUrls.length === 0) {
+    return { ok: false, error: 'Không có pageUrls' }
+  }
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return { ok: false, error: 'Không có voiceover segments — bấm "Tạo voiceover" trước' }
+  }
+
+  const mSlug = safeSlug(mangaSlug || 'manga')
+  const cSlug = safeSlug(chapterSlug || 'chapter')
+  const vSlug = safeSlug(voice || 'charon')
+  const v = (voice || 'Charon').trim()
+  const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
+  const lang = (language || 'en-US').trim()
+
+  const userData = app.getPath('userData')
+  const downloadsDir = path.join(userData, 'downloads', mSlug, cSlug)
+  const cacheBaseDir = path.join(userData, 'video-cache')
+  const clipsDir = path.join(cacheBaseDir, 'clips', `${mSlug}__${cSlug}`)
+  const videosDir = path.join(userData, 'videos')
+  const finalOut = path.join(videosDir, `${mSlug}__${cSlug}__${vSlug}.mp4`)
+
+  fs.mkdirSync(clipsDir, { recursive: true })
+  fs.mkdirSync(videosDir, { recursive: true })
+
+  const progress = info => evt.sender.send('video:render:progress', info)
+
+  try {
+    // ── Phase 1: download all pages
+    progress({ phase: 'download', i: 0, total: pageUrls.length, msg: 'Bắt đầu tải panels...' })
+    const localPaths = await downloadPagesToDisk({
+      pageUrls,
+      referer,
+      dir: downloadsDir,
+      onProgress: info => progress({ phase: 'download', ...info })
+    })
+
+    // Validate panel ranges against actual download count
+    for (const seg of segments) {
+      if (seg.panelStart < 0 || seg.panelEnd >= localPaths.length || seg.panelStart > seg.panelEnd) {
+        return { ok: false, error: `Segment "${seg.text.slice(0, 40)}..." có panel range [${seg.panelStart}-${seg.panelEnd}] ngoài phạm vi (max ${localPaths.length - 1})` }
+      }
+    }
+
+    // ── Phase 2: TTS batch with cache
+    progress({ phase: 'tts', i: 0, total: segments.length, msg: 'Synthesize voice...' })
+    const ttsResults = []
+    let cacheHits = 0
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]
+      const text = String(seg.text || '').trim()
+      if (!text) continue
+      const result = await ttsCache.getOrFetch(
+        { text, voice: v, model: m, language: lang, baseDir: cacheBaseDir },
+        () => fetchTtsWav({ text, voice: v, model: m, language: lang })
+      )
+      if (result.cached) cacheHits++
+      ttsResults.push({
+        segmentIdx: i,
+        text,
+        panelStart: seg.panelStart,
+        panelEnd: seg.panelEnd,
+        audioPath: result.path,
+        hash: result.hash,
+        cached: result.cached
+      })
+      progress({ phase: 'tts', i: i + 1, total: segments.length, cached: result.cached, hash: result.hash })
+    }
+
+    // ── Phase 3: render per-segment cinematic clip
+    progress({ phase: 'render', i: 0, total: ttsResults.length, msg: 'Render cinematic clips...' })
+    const clipPaths = []
+    for (let i = 0; i < ttsResults.length; i++) {
+      const r = ttsResults[i]
+      const panels = []
+      for (let p = r.panelStart; p <= r.panelEnd; p++) panels.push(localPaths[p])
+      const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
+      await cinematic.renderSegmentClip({
+        panelPaths: panels,
+        audioPath: r.audioPath,
+        captionText: r.text,
+        outPath: clipOut
+      })
+      clipPaths.push(clipOut)
+      progress({ phase: 'render', i: i + 1, total: ttsResults.length })
+    }
+
+    // ── Phase 4: concat clips → final MP4
+    progress({ phase: 'concat', msg: 'Ghép thành MP4 cuối...' })
+    await cinematic.concatClips({ clipPaths, outPath: finalOut })
+    progress({ phase: 'done', outPath: finalOut })
+
+    return {
+      ok: true,
+      data: {
+        outPath: finalOut,
+        segments: ttsResults.length,
+        ttsHits: cacheHits,
+        ttsCalls: ttsResults.length - cacheHits,
+        clipsDir,
+        bytes: fs.statSync(finalOut).size
+      }
+    }
+  } catch (e) {
+    progress({ phase: 'error', error: e.message })
+    return { ok: false, error: e.message }
+  }
+})
+
+// ----- M4.4 Video Render Batch (multi-chapter concat into 1 MP4) -----
+// Loops over each chapter: download → TTS → render clips. After ALL chapters
+// done, single ffmpeg concat across every clip → 1 final MP4. Progress events
+// carry chapterIdx/chapterTotal so UI can show "ch 2/5 · render 4/7".
+
+ipcMain.handle('video:renderBatch', async (evt, opts) => {
+  const {
+    chapters,
+    referer,
+    voice,
+    model,
+    language,
+    mangaSlug
+  } = opts || {}
+
+  if (!Array.isArray(chapters) || chapters.length === 0) {
+    return { ok: false, error: 'Không có chapters' }
+  }
+  for (const ch of chapters) {
+    if (!Array.isArray(ch.pageUrls) || ch.pageUrls.length === 0) {
+      return { ok: false, error: `Chapter "${ch.chapterSlug}" không có pageUrls` }
+    }
+    if (!Array.isArray(ch.segments) || ch.segments.length === 0) {
+      return { ok: false, error: `Chapter "${ch.chapterSlug}" không có segments` }
+    }
+  }
+
+  const mSlug = safeSlug(mangaSlug || 'manga')
+  const vSlug = safeSlug(voice || 'charon')
+  const v = (voice || 'Charon').trim()
+  const m = (model || 'gemini/gemini-2.5-flash-preview-tts').trim()
+  const lang = (language || 'en-US').trim()
+
+  const userData = app.getPath('userData')
+  const cacheBaseDir = path.join(userData, 'video-cache')
+  const videosDir = path.join(userData, 'videos')
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const finalOut = path.join(videosDir, `${mSlug}__multi${chapters.length}__${vSlug}__${stamp}.mp4`)
+
+  fs.mkdirSync(videosDir, { recursive: true })
+
+  const progress = info => evt.sender.send('video:render:progress', info)
+  const allClips = []
+  let totalCacheHits = 0
+  let totalTtsCalls = 0
+
+  try {
+    for (let chapterIdx = 0; chapterIdx < chapters.length; chapterIdx++) {
+      const ch = chapters[chapterIdx]
+      const cSlug = safeSlug(ch.chapterSlug || `chapter${chapterIdx + 1}`)
+      const downloadsDir = path.join(userData, 'downloads', mSlug, cSlug)
+      const clipsDir = path.join(cacheBaseDir, 'clips', `${mSlug}__${cSlug}`)
+      fs.mkdirSync(clipsDir, { recursive: true })
+
+      const chIdxOut = chapterIdx + 1
+      const chTotal = chapters.length
+
+      // Phase 1: download pages
+      progress({ phase: 'download', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ch.pageUrls.length, msg: `Tải ${cSlug}...` })
+      const localPaths = await downloadPagesToDisk({
+        pageUrls: ch.pageUrls,
+        referer,
+        dir: downloadsDir,
+        onProgress: info => progress({ phase: 'download', chapterIdx: chIdxOut, chapterTotal: chTotal, ...info })
+      })
+
+      // Validate panel ranges
+      for (const seg of ch.segments) {
+        if (seg.panelStart < 0 || seg.panelEnd >= localPaths.length || seg.panelStart > seg.panelEnd) {
+          return { ok: false, error: `Ch ${cSlug}: segment "${String(seg.text).slice(0, 40)}..." panel [${seg.panelStart}-${seg.panelEnd}] ngoài range (max ${localPaths.length - 1})` }
+        }
+      }
+
+      // Phase 2: TTS batch
+      progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ch.segments.length, msg: 'Synthesize voice...' })
+      const ttsResults = []
+      for (let i = 0; i < ch.segments.length; i++) {
+        const seg = ch.segments[i]
+        const text = String(seg.text || '').trim()
+        if (!text) continue
+        const result = await ttsCache.getOrFetch(
+          { text, voice: v, model: m, language: lang, baseDir: cacheBaseDir },
+          () => fetchTtsWav({ text, voice: v, model: m, language: lang })
+        )
+        if (result.cached) totalCacheHits++; else totalTtsCalls++
+        ttsResults.push({
+          segmentIdx: i,
+          text,
+          panelStart: seg.panelStart,
+          panelEnd: seg.panelEnd,
+          audioPath: result.path,
+          hash: result.hash,
+          cached: result.cached
+        })
+        progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ch.segments.length, cached: result.cached, hash: result.hash })
+      }
+
+      // Phase 3: render clips
+      progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ttsResults.length, msg: 'Render cinematic clips...' })
+      for (let i = 0; i < ttsResults.length; i++) {
+        const r = ttsResults[i]
+        const panels = []
+        for (let p = r.panelStart; p <= r.panelEnd; p++) panels.push(localPaths[p])
+        const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
+        await cinematic.renderSegmentClip({
+          panelPaths: panels,
+          audioPath: r.audioPath,
+          captionText: r.text,
+          outPath: clipOut
+        })
+        allClips.push(clipOut)
+        progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ttsResults.length })
+      }
+    }
+
+    // Final concat — all clips from all chapters in order
+    progress({ phase: 'concat', msg: `Ghép ${allClips.length} clip → 1 MP4...` })
+    await cinematic.concatClips({ clipPaths: allClips, outPath: finalOut })
+    progress({ phase: 'done', outPath: finalOut })
+
+    return {
+      ok: true,
+      data: {
+        outPath: finalOut,
+        chapters: chapters.length,
+        segments: allClips.length,
+        ttsHits: totalCacheHits,
+        ttsCalls: totalTtsCalls,
+        bytes: fs.statSync(finalOut).size
+      }
+    }
+  } catch (e) {
+    progress({ phase: 'error', error: e.message })
+    return { ok: false, error: e.message }
+  }
+})
+
+// ----- License auth (yohomin.com) -----
+// Mirrors Baru-YTB's flow: device_id UUID + verify key with server + persist
+// status. Renderer hits these to gate the main UI.
+
+ipcMain.handle('license:status', async () => {
+  try {
+    return { ok: true, data: await license.getStatus(app.getPath('userData')) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('license:setKey', async (_e, { key }) => {
+  try {
+    return { ok: true, data: await license.setKey(key, app.getPath('userData')) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('license:clear', async () => {
+  try {
+    return { ok: true, data: license.clear(app.getPath('userData')) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('license:deviceId', async () => {
+  return { ok: true, data: { deviceId: license.getDeviceId(app.getPath('userData')) } }
+})
+
+// ----- Workspace (1 manga = 1 saved series) -----
+
+ipcMain.handle('workspace:list', async () => {
+  try { return { ok: true, data: workspace.listSummaries(app.getPath('userData')) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('workspace:get', async (_e, { id }) => {
+  try { return { ok: true, data: workspace.get(app.getPath('userData'), id) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('workspace:create', async (_e, input) => {
+  try { return { ok: true, data: workspace.create(app.getPath('userData'), input) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('workspace:update', async (_e, { id, patch }) => {
+  try { return { ok: true, data: workspace.update(app.getPath('userData'), id, patch) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('workspace:delete', async (_e, { id }) => {
+  try { return { ok: true, data: workspace.remove(app.getPath('userData'), id) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('workspace:upsertChapter', async (_e, { workspaceId, chapter }) => {
+  try { return { ok: true, data: workspace.upsertChapter(app.getPath('userData'), workspaceId, chapter) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('workspace:removeChapter', async (_e, { workspaceId, chapterId }) => {
+  try { return { ok: true, data: workspace.removeChapter(app.getPath('userData'), workspaceId, chapterId) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('video:openFolder', async (_e, { videoPath }) => {
+  // Reveal in Explorer / Finder
+  try {
+    require('electron').shell.showItemInFolder(videoPath)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
