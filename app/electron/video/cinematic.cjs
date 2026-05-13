@@ -132,14 +132,24 @@ function wrapCaption(text, maxChars = 60) {
 async function renderSinglePanelClip({ panelPath, duration, fps, dims, outPath }) {
   const { width: W, height: H } = dims
   const frames = Math.max(1, Math.round(duration * fps))
-  const zpInner = W * 2
   if (!fs.existsSync(panelPath)) throw new Error(`Panel not found: ${panelPath}`)
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
+  // Filter graph (single-input zoompan recipe):
+  //   bg = scale+crop to fill canvas, then boxblur for "frosted glass" feel
+  //   fg = scale to FIT within canvas (decrease) so portrait manga panels
+  //        keep their natural aspect ratio; then a subtle zoompan
+  //        (1.0 → 1.08 over duration) for cinematic drift without bóp size
+  //   overlay center
+  //
+  // Earlier version pre-scaled fg to 2×W (3840 wide) which made portrait
+  // 1000×1500 panels balloon to 3840×5760, then zoompan cropped down to
+  // 1920×1080 → user saw "phóng to quá, bị bóp 9:16 thành 16:9".
   const filterComplex = [
     `[0:v]split[bg][fg]`,
     `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1[bgb]`,
-    `[fg]scale=${zpInner}:-1:force_original_aspect_ratio=decrease,zoompan=z='min(1+0.3*on/${frames},1.3)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1[fgz]`,
+    `[fg]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1[fgs]`,
+    `[fgs]zoompan=z='min(1.0+0.08*on/${frames},1.08)':d=${frames}:s=${W}x${H}:fps=${fps}[fgz]`,
     `[bgb][fgz]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]`
   ].join(';')
 
@@ -200,8 +210,28 @@ async function renderSegmentClip(opts) {
   if (!fs.existsSync(audioPath)) throw new Error(`Audio not found: ${audioPath}`)
 
   const totalDur = await probeDuration(audioPath)
-  const perPanelDur = totalDur / panelPaths.length
-  console.log(`[renderSegmentClip] ${panelPaths.length} panels, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, out: ${path.basename(outPath)}`)
+
+  // Cap panels per segment by minimum on-screen time. AI sometimes assigns
+  // 15+ panels to a short narration; rendering them at 1.2s each strobes
+  // and viewers can't actually read panels. Force min 2.5s/panel; if the
+  // segment can't fit them all, sample evenly and drop the rest.
+  const MIN_PER_PANEL_DUR = 2.5
+  let usePanels = panelPaths
+  if (panelPaths.length * MIN_PER_PANEL_DUR > totalDur) {
+    const maxPanels = Math.max(1, Math.floor(totalDur / MIN_PER_PANEL_DUR))
+    if (maxPanels < panelPaths.length) {
+      const sampled = []
+      for (let i = 0; i < maxPanels; i++) {
+        const idx = Math.floor(i * panelPaths.length / maxPanels)
+        sampled.push(panelPaths[idx])
+      }
+      console.log(`[renderSegmentClip] capped ${panelPaths.length} panels → ${sampled.length} (audio ${totalDur.toFixed(1)}s ÷ min ${MIN_PER_PANEL_DUR}s/panel)`)
+      usePanels = sampled
+    }
+  }
+
+  const perPanelDur = totalDur / usePanels.length
+  console.log(`[renderSegmentClip] ${usePanels.length} panels effective, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, out: ${path.basename(outPath)}`)
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
@@ -221,12 +251,12 @@ async function renderSegmentClip(opts) {
   const tmpDir = path.join(path.dirname(outPath), `_tmp_${path.basename(outPath, '.mp4')}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
-  // Stage 1: per-panel silent clips
+  // Stage 1: per-panel silent clips (using capped/sampled usePanels)
   const panelClips = []
-  for (let i = 0; i < panelPaths.length; i++) {
+  for (let i = 0; i < usePanels.length; i++) {
     const pc = path.join(tmpDir, `panel_${String(i).padStart(3, '0')}.mp4`)
     await renderSinglePanelClip({
-      panelPath: panelPaths[i],
+      panelPath: usePanels[i],
       duration: perPanelDur,
       fps,
       dims,
