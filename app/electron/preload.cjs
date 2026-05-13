@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld('api', {
     update: (id, patch) => ipcRenderer.invoke('workspace:update', { id, patch }),
     delete: id => ipcRenderer.invoke('workspace:delete', { id }),
     upsertChapter: (workspaceId, chapter) => ipcRenderer.invoke('workspace:upsertChapter', { workspaceId, chapter }),
-    removeChapter: (workspaceId, chapterId) => ipcRenderer.invoke('workspace:removeChapter', { workspaceId, chapterId })
+    removeChapter: (workspaceId, chapterId) => ipcRenderer.invoke('workspace:removeChapter', { workspaceId, chapterId }),
+    scanPages: (workspaceId, chapters) => ipcRenderer.invoke('workspace:scanPages', { workspaceId, chapters })
   }
 })

@@ -128,6 +128,22 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     })
   }, [])
 
+  // Sync localPaths from disk whenever the workspace changes. Files persist
+  // across app restarts but the React state Map doesn't — without this scan
+  // the user would need to re-download even though the JPGs are already on
+  // disk.
+  useEffect(() => {
+    if (!ws || !window.api?.workspace) return
+    let mounted = true
+    window.api.workspace.scanPages(ws.id, ws.chapters.map(c => ({ id: c.id, number: c.number }))).then(r => {
+      if (!mounted) return
+      if (r.ok) {
+        setLocalPaths(new Map(Object.entries(r.data)))
+      }
+    })
+    return () => { mounted = false }
+  }, [ws?.id])
+
   // Subscribe to render progress
   useEffect(() => {
     if (!window.api?.video?.onProgress) return

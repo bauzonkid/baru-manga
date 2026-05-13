@@ -288,6 +288,32 @@ ipcMain.handle('chapter:openDownloadsFolder', async (_e, { workspaceId, mangaSlu
 // Download chapter pages. With `workspaceId`, files land inside the workspace
 // folder (everything for one manga in one place). Without, legacy path under
 // downloads/<mSlug>/<cSlug>/ — kept for backward compat.
+// Scan workspace pages/ folder for already-downloaded chapter files. Returns
+// { [chapterId]: localPaths[] } for chapters whose folder has files. Called
+// on workspace load so the UI knows what's already on disk after a restart —
+// no need to re-download.
+ipcMain.handle('workspace:scanPages', async (_e, { workspaceId, chapters }) => {
+  try {
+    if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
+    const pagesRoot = path.join(workspace.workspaceDir(app.getPath('userData'), workspaceId), 'pages')
+    const result = {}
+    for (const ch of (chapters || [])) {
+      const slug = safeSlug(`ch${ch.number}`)
+      const chDir = path.join(pagesRoot, slug)
+      try {
+        const files = fs.readdirSync(chDir)
+          .filter(f => /^page_\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f))
+          .sort()
+          .map(f => path.join(chDir, f))
+        if (files.length > 0) result[ch.id] = files
+      } catch { /* chapter dir not yet downloaded */ }
+    }
+    return { ok: true, data: result }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 // Read already-downloaded local files as base64 — used by AI voiceover gen
 // so it doesn't re-fetch from CDN after Step 3 Download.
 ipcMain.handle('chapter:readLocalAsBase64', async (_e, { paths }) => {
