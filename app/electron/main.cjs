@@ -644,14 +644,23 @@ function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style)
 Output a JSON object exactly matching this schema (no markdown, no commentary):
 {
   "segments": [
-    { "text": "<one sentence or short paragraph in ${langName}>", "panelStart": <0-based int>, "panelEnd": <0-based int, inclusive> },
+    {
+      "text": "<one sentence or short paragraph in ${langName}>",
+      "panelStart": <0-based int, inclusive>,
+      "panelEnd":   <0-based int, inclusive>,
+      "keyPanels":  [<int>, <int>, ...]
+    },
     ...
   ]
 }
 
 Rules:
-- 5 to 15 segments total. Each segment maps to a CONTIGUOUS range of panels (no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}).
-- Each segment's text is 1-3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that panel range.
+- 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
+- keyPanels: from within [panelStart..panelEnd], pick 1–5 panel indices that are the KEY visual beats — the panels viewers should actually see on screen while the narration plays. Aim for 2–3 key panels per segment.
+  · Include panels that introduce characters, reveal action, show emotional beats, or close out the segment.
+  · SKIP transition/establishing panels, dialog-only panels with no new visual, and redundant action frames.
+  · keyPanels must be a subset of [panelStart..panelEnd], strictly increasing, no duplicates.
+- Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
 
@@ -711,7 +720,9 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
           }
         }
         const segments = Array.isArray(parsed.segments) ? parsed.segments : []
-        // Sanitize: ensure ints, contiguous, in range
+        // Sanitize: ensure ints, contiguous, in range. Plus keyPanels:
+        // validate AI's panel picks; if missing/invalid, sample 3 evenly
+        // from the segment's range as a sensible default.
         const clean = []
         let nextStart = 0
         for (const s of segments) {
@@ -719,7 +730,30 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
           const end = Math.min(declaredPanels - 1, Math.max(start, Math.floor(Number(s.panelEnd) || start)))
           const t = String(s.text || '').trim()
           if (!t) continue
-          clean.push({ text: t, panelStart: start, panelEnd: end })
+
+          // Validate keyPanels: ints, in [start..end], unique, sorted
+          let keyPanels = Array.isArray(s.keyPanels)
+            ? s.keyPanels
+                .map(n => Math.floor(Number(n)))
+                .filter(n => Number.isFinite(n) && n >= start && n <= end)
+            : []
+          keyPanels = Array.from(new Set(keyPanels)).sort((a, b) => a - b)
+          // Cap at 5 — too many panels per segment strobes
+          if (keyPanels.length > 5) {
+            const sampled = []
+            for (let i = 0; i < 5; i++) sampled.push(keyPanels[Math.floor(i * keyPanels.length / 5)])
+            keyPanels = sampled
+          }
+          // Default: sample up to 3 evenly across the range if AI gave nothing
+          if (keyPanels.length === 0) {
+            const span = end - start + 1
+            const desired = Math.min(span, 3)
+            for (let i = 0; i < desired; i++) {
+              keyPanels.push(start + Math.floor(i * span / desired))
+            }
+          }
+
+          clean.push({ text: t, panelStart: start, panelEnd: end, keyPanels })
           nextStart = end + 1
           if (nextStart >= declaredPanels) break
         }
@@ -1131,6 +1165,7 @@ ipcMain.handle('video:render', async (evt, opts) => {
         text,
         panelStart: seg.panelStart,
         panelEnd: seg.panelEnd,
+        keyPanels: Array.isArray(seg.keyPanels) ? seg.keyPanels : null,
         audioPath: result.path,
         hash: result.hash,
         cached: result.cached
@@ -1143,8 +1178,14 @@ ipcMain.handle('video:render', async (evt, opts) => {
     const clipPaths = []
     for (let i = 0; i < ttsResults.length; i++) {
       const r = ttsResults[i]
-      const panels = []
-      for (let p = r.panelStart; p <= r.panelEnd; p++) panels.push(localPaths[p])
+      let panelIdxs
+      if (Array.isArray(r.keyPanels) && r.keyPanels.length > 0) {
+        panelIdxs = r.keyPanels.filter(idx => idx >= 0 && idx < localPaths.length)
+      } else {
+        panelIdxs = []
+        for (let p = r.panelStart; p <= r.panelEnd; p++) panelIdxs.push(p)
+      }
+      const panels = panelIdxs.map(idx => localPaths[idx])
       const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
       await cinematic.renderSegmentClip({
         panelPaths: panels,
@@ -1287,6 +1328,7 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
           text,
           panelStart: seg.panelStart,
           panelEnd: seg.panelEnd,
+          keyPanels: Array.isArray(seg.keyPanels) ? seg.keyPanels : null,
           audioPath: result.path,
           hash: result.hash,
           cached: result.cached
@@ -1294,15 +1336,23 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
         progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ch.segments.length, cached: result.cached, hash: result.hash })
       }
 
-      // Phase 3: render clips
+      // Phase 3: render clips. Prefer AI-picked keyPanels (the visual beats
+      // viewers should actually see); fall back to full range only if AI
+      // didn't provide them.
       progress({ phase: 'render', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ttsResults.length, msg: 'Render cinematic clips...' })
       for (let i = 0; i < ttsResults.length; i++) {
         const r = ttsResults[i]
-        const panels = []
-        for (let p = r.panelStart; p <= r.panelEnd; p++) panels.push(localPaths[p])
-        console.log(`[renderBatch] segment ${i}: panels [${r.panelStart}..${r.panelEnd}] = ${panels.length} ảnh, text="${(r.text || '').slice(0, 60)}..."`)
+        let panelIndices
+        if (Array.isArray(r.keyPanels) && r.keyPanels.length > 0) {
+          panelIndices = r.keyPanels.filter(idx => idx >= 0 && idx < localPaths.length)
+        } else {
+          panelIndices = []
+          for (let p = r.panelStart; p <= r.panelEnd; p++) panelIndices.push(p)
+        }
+        const panels = panelIndices.map(idx => localPaths[idx])
+        console.log(`[renderBatch] segment ${i}: range [${r.panelStart}..${r.panelEnd}], keyPanels [${panelIndices.join(',')}] = ${panels.length} ảnh, text="${(r.text || '').slice(0, 60)}..."`)
         if (panels.length === 0) {
-          console.warn(`[renderBatch] segment ${i} has 0 panels! Range invalid (start=${r.panelStart}, end=${r.panelEnd}, localPaths length=${localPaths.length})`)
+          console.warn(`[renderBatch] segment ${i} has 0 panels! (range start=${r.panelStart}, end=${r.panelEnd}, keyPanels=${JSON.stringify(r.keyPanels)}, localPaths length=${localPaths.length})`)
         }
         const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
         await cinematic.renderSegmentClip({

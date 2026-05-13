@@ -214,27 +214,12 @@ async function renderSegmentClip(opts) {
 
   const totalDur = await probeDuration(audioPath)
 
-  // Cap panels per segment by minimum on-screen time. AI sometimes assigns
-  // 15+ panels to a short narration; rendering them at 1.2s each strobes
-  // and viewers can't actually read panels. Force min 2.5s/panel; if the
-  // segment can't fit them all, sample evenly and drop the rest.
-  const MIN_PER_PANEL_DUR = 2.5
-  let usePanels = panelPaths
-  if (panelPaths.length * MIN_PER_PANEL_DUR > totalDur) {
-    const maxPanels = Math.max(1, Math.floor(totalDur / MIN_PER_PANEL_DUR))
-    if (maxPanels < panelPaths.length) {
-      const sampled = []
-      for (let i = 0; i < maxPanels; i++) {
-        const idx = Math.floor(i * panelPaths.length / maxPanels)
-        sampled.push(panelPaths[idx])
-      }
-      console.log(`[renderSegmentClip] capped ${panelPaths.length} panels → ${sampled.length} (audio ${totalDur.toFixed(1)}s ÷ min ${MIN_PER_PANEL_DUR}s/panel)`)
-      usePanels = sampled
-    }
-  }
-
+  // Use panels caller gave us — AI now picks keyPanels per segment (1–5
+  // panel indices that are the visual beats viewers should see). Caller
+  // already resolved keyPanels → localPaths; no auto-cap here.
+  const usePanels = panelPaths
   const perPanelDur = totalDur / usePanels.length
-  console.log(`[renderSegmentClip] ${usePanels.length} panels effective, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, out: ${path.basename(outPath)}`)
+  console.log(`[renderSegmentClip] ${usePanels.length} panels, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, out: ${path.basename(outPath)}`)
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 

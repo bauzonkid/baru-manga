@@ -17,6 +17,13 @@ export interface VoiceoverSegment {
   text: string
   panelStart: number
   panelEnd: number
+  /**
+   * AI-picked panel indices within [panelStart..panelEnd] that are the
+   * KEY visual beats viewers see on screen. Strictly increasing, deduped,
+   * subset of the range. 1–5 panels per segment.
+   * Backend sanitize falls back to a 3-panel even sample when AI omits.
+   */
+  keyPanels?: number[]
 }
 
 export interface VideoProgress {

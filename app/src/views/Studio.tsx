@@ -1523,7 +1523,15 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                                   <div className="flex items-center gap-3 text-zinc-400">
                                     <span className="font-semibold text-zinc-200">Segment {i + 1}/{list.length}</span>
                                     <span className="text-zinc-600">·</span>
-                                    <span>Panel <span className="text-zinc-300">{seg.panelStart}</span> – <span className="text-zinc-300">{seg.panelEnd}</span> ({panelSpan} ảnh)</span>
+                                    <span>Range [<span className="text-zinc-300">{seg.panelStart}</span>–<span className="text-zinc-300">{seg.panelEnd}</span>] {panelSpan} ảnh</span>
+                                    {Array.isArray(seg.keyPanels) && seg.keyPanels.length > 0 && (
+                                      <>
+                                        <span className="text-zinc-600">·</span>
+                                        <span className="text-rose-300" title={`Render panel indices: ${seg.keyPanels.join(', ')}`}>
+                                          Render {seg.keyPanels.length} ảnh [{seg.keyPanels.join(',')}]
+                                        </span>
+                                      </>
+                                    )}
                                     <span className="text-zinc-600">·</span>
                                     <span>{chars} chữ ~{estSec}s</span>
                                   </div>
