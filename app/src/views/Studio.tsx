@@ -42,11 +42,30 @@ interface ChapterEntry {
 }
 
 export default function Studio({ onOpenLegacy }: StudioProps) {
-  // ── Section 1: Input ─────────────────────────────────────────────────
+  // ── Section 1: Input + workspace picker ──────────────────────────────
+  interface WorkspaceSummary {
+    id: string
+    title: string
+    cover: string | null
+    source: { pluginId: string; mangaId: string; url?: string } | null
+    chapterCount: number
+    renderedCount: number
+    createdAt: string
+    updatedAt: string
+  }
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [phase, setPhase] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
+  const [wsList, setWsList] = useState<WorkspaceSummary[]>([])
+
+  // Load existing workspace summaries on mount + after CRUD ops
+  const refreshWsList = async () => {
+    if (!window.api?.workspace) return
+    const r = await window.api.workspace.list()
+    if (r.ok) setWsList(r.data as WorkspaceSummary[])
+  }
+  useEffect(() => { refreshWsList() }, [])
 
   // ── Section 2: Workspace + chapters ──────────────────────────────────
   const [ws, setWs] = useState<WorkspaceData | null>(null)
@@ -262,6 +281,40 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     if (!created.ok) { setError(created.error); return }
     setWs(created.data as WorkspaceData)
     setActiveStep(2) // auto-advance to chapter picker
+    refreshWsList()
+  }
+
+  const loadExistingWorkspace = async (wsId: string) => {
+    if (!window.api?.workspace) return
+    setBusy(true)
+    setError(null)
+    setPhase('Loading workspace...')
+    const r = await window.api.workspace.get(wsId)
+    setBusy(false)
+    setPhase('')
+    if (!r.ok) { setError(r.error); return }
+    if (r.data) {
+      setWs(r.data as WorkspaceData)
+      // Reset transient state — fresh start with this workspace
+      setSelectedChapters(new Set())
+      setSegments(new Map())
+      setLocalPaths(new Map())
+      setRenderOutput(null)
+      setRenderError(null)
+      setActiveStep(2)
+    }
+  }
+
+  const deleteWorkspace = async (wsId: string, title: string) => {
+    if (!window.api?.workspace) return
+    if (!confirm(`Xoá workspace "${title}"? Folder workspace (pages, voiceover, video) sẽ bị xoá hết.`)) return
+    const r = await window.api.workspace.delete(wsId)
+    if (!r.ok) { setError(r.error); return }
+    if (ws?.id === wsId) {
+      setWs(null)
+      setActiveStep(1)
+    }
+    refreshWsList()
   }
 
   const toggleChapter = (chId: string) => {
@@ -690,9 +743,78 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         <main className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-8 py-8 space-y-6">
 
-          {/* SECTION 1: Input URL */}
+          {/* SECTION 1: Input URL + existing workspace picker */}
           {activeStep === 1 && (
           <Section number={1} title="Nguồn manga">
+            {wsList.length > 0 && (
+              <div className="mb-5">
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-2.5 flex items-center justify-between">
+                  <span>Workspace đã có ({wsList.length})</span>
+                  <span className="text-[10px] text-zinc-600">Click để mở · hover hiện nút xoá</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                  {wsList.map(w => {
+                    const isCurrent = ws?.id === w.id
+                    return (
+                      <div
+                        key={w.id}
+                        className="group relative rounded-lg p-2 cursor-pointer transition-colors hover:bg-zinc-800/40"
+                        style={{
+                          backgroundColor: isCurrent ? 'rgba(244, 63, 94, 0.08)' : '#0a0a0b',
+                          borderColor: isCurrent ? 'rgba(244, 63, 94, 0.3)' : '#27272a',
+                          borderWidth: '1px'
+                        }}
+                        onClick={() => loadExistingWorkspace(w.id)}
+                      >
+                        <div className="flex gap-2.5">
+                          {w.cover ? (
+                            <PageImage
+                              url={w.cover}
+                              referer={w.source?.url}
+                              alt=""
+                              className="w-12 aspect-[2/3] object-cover rounded shrink-0"
+                              style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                            />
+                          ) : (
+                            <div
+                              className="w-12 aspect-[2/3] rounded shrink-0 flex items-center justify-center text-zinc-700 text-2xl"
+                              style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px' }}
+                            >
+                              📖
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-medium text-zinc-100 truncate" title={w.title}>{w.title}</div>
+                            <div className="text-[10px] text-zinc-500 mt-1">
+                              {w.chapterCount} chap
+                              {w.renderedCount > 0 && (
+                                <span className="ml-1.5 text-emerald-300">· {w.renderedCount} render</span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-zinc-600 mt-0.5 capitalize">
+                              {w.source?.pluginId || '—'}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={e => { e.stopPropagation(); deleteWorkspace(w.id, w.title) }}
+                          className="absolute top-1 right-1 w-5 h-5 rounded text-zinc-500 hover:text-rose-400 hover:bg-zinc-900/80 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                          title="Xoá workspace"
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500 mt-5 mb-2">
+                  Hoặc paste link manga mới
+                </div>
+              </div>
+            )}
             <form onSubmit={handleOpen} className="flex gap-2">
               <input
                 type="text"
