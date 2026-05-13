@@ -892,6 +892,12 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   })
                 )}
               </div>
+              <StepNextBar
+                disabled={selectedList.length === 0}
+                hint={selectedList.length === 0 ? 'Chọn ít nhất 1 chapter để tiếp tục' : `${selectedList.length} chapter sẵn sàng`}
+                label="Tiếp: Voiceover"
+                onNext={() => setActiveStep(3)}
+              />
             </Section>
           )}
 
@@ -1039,6 +1045,13 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   )
                 })}
               </div>
+              <StepNextBar
+                disabled={!allSelectedHaveSegments}
+                hint={allSelectedHaveSegments ? 'Đủ script cho mọi chapter' : `Còn ${selectedList.length - segments.size} chapter chưa gen`}
+                label="Tiếp: Giọng đọc"
+                onNext={() => setActiveStep(4)}
+                onBack={() => setActiveStep(2)}
+              />
             </Section>
           )}
 
@@ -1105,6 +1118,13 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   </label>
                 </div>
               )}
+              <StepNextBar
+                disabled={false}
+                hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()}`}
+                label="Tiếp: Render"
+                onNext={() => setActiveStep(5)}
+                onBack={() => setActiveStep(3)}
+              />
             </Section>
           )}
 
@@ -1192,6 +1212,10 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   </div>
                 )}
               </div>
+              <StepNextBar
+                onBack={() => setActiveStep(4)}
+                hint={renderOutput ? 'Hoàn thành — sếp có thể đổi voice/chapter để re-render' : 'Bấm "Render video" ở trên để chạy pipeline'}
+              />
             </Section>
           )}
 
@@ -1306,6 +1330,50 @@ function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, all
         })}
       </div>
     </aside>
+  )
+}
+
+// ─── Step Next/Back bar ──────────────────────────────────────────────────
+// Lives at the bottom of each section, guides user to the next step.
+// Hint text on the left explains state; Back/Next buttons on the right.
+
+interface StepNextBarProps {
+  onNext?: () => void
+  onBack?: () => void
+  label?: string
+  hint?: string
+  disabled?: boolean
+}
+
+function StepNextBar({ onNext, onBack, label, hint, disabled }: StepNextBarProps) {
+  return (
+    <div
+      className="mt-5 pt-4 flex items-center gap-3"
+      style={{ borderTopColor: '#27272a', borderTopWidth: '1px' }}
+    >
+      {onBack && (
+        <button
+          onClick={onBack}
+          className="text-xs px-3 py-1.5 rounded-md text-zinc-400 hover:text-zinc-100 transition-colors"
+          style={{ borderColor: '#27272a', borderWidth: '1px' }}
+        >
+          ← Quay lại
+        </button>
+      )}
+      {hint && (
+        <span className="text-[11px] text-zinc-500 truncate">{hint}</span>
+      )}
+      {onNext && (
+        <button
+          onClick={onNext}
+          disabled={disabled}
+          className="ml-auto text-xs font-medium px-4 py-2 rounded-md text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ backgroundColor: '#f43f5e' }}
+        >
+          {label || 'Tiếp'} →
+        </button>
+      )}
+    </div>
   )
 }
 
