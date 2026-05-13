@@ -83,6 +83,29 @@ function absolutize(src, baseUrl) {
   try { return new URL(src, baseUrl).href } catch { return null }
 }
 
+// Pick the largest URL out of a srcset string like
+//   "small.jpg 1x, medium.jpg 2x, large.jpg 3x"
+// or
+//   "thumb.jpg 320w, medium.jpg 640w, large.jpg 1280w"
+// Falls back to the last URL (typically highest density) if descriptors
+// are missing.
+function pickLargestFromSrcset(srcset) {
+  const entries = String(srcset).split(',').map(s => s.trim()).filter(Boolean)
+  if (entries.length === 0) return ''
+  let bestUrl = ''
+  let bestWeight = -1
+  for (const e of entries) {
+    const [url, descriptor] = e.split(/\s+/)
+    if (!url) continue
+    const w = parseFloat(descriptor) || 1
+    if (w > bestWeight) {
+      bestUrl = url
+      bestWeight = w
+    }
+  }
+  return bestUrl || entries[entries.length - 1].split(/\s+/)[0]
+}
+
 function extractImages(html, baseUrl) {
   const out = []
   const seen = new Set()
@@ -96,8 +119,15 @@ function extractImages(html, baseUrl) {
     for (const a of srcAttrs) {
       const am = attrs.match(new RegExp(`\\b${a}=["']([^"']+)["']`, 'i'))
       if (am) {
-        // srcset/data-srcset: take first URL
-        chosen = am[1].split(',')[0].trim().split(/\s+/)[0]
+        const raw = am[1]
+        if (a === 'srcset' || a === 'data-srcset') {
+          // Multiple sizes — pick the LARGEST for highest quality. Previous
+          // code took the first which was usually the smallest thumbnail
+          // → downloaded panels looked tiny / cropped at render time.
+          chosen = pickLargestFromSrcset(raw)
+        } else {
+          chosen = raw.split(',')[0].trim().split(/\s+/)[0]
+        }
         break
       }
     }
