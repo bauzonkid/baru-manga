@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
     registerReferer: (pageUrls, referer) =>
       ipcRenderer.invoke('chapter:registerReferer', { pageUrls, referer }),
     download: opts => ipcRenderer.invoke('chapter:download', opts),
+    readLocalAsBase64: paths => ipcRenderer.invoke('chapter:readLocalAsBase64', { paths }),
     openDownloadsFolder: ({ workspaceId, mangaSlug } = {}) =>
       ipcRenderer.invoke('chapter:openDownloadsFolder', { workspaceId, mangaSlug }),
     onDownloadProgress: cb => {

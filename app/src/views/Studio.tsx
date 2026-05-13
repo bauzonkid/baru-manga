@@ -437,33 +437,38 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     setErrorFor(chId, null)
 
     try {
-      // 1. Fetch page URLs
-      setPhaseFor(chId, 'Fetching pages...')
-      const pgRes = await window.api.plugins.getPages(ws.source!.pluginId, chId)
-      if (!pgRes.ok) throw new Error(pgRes.error)
-      if (pgRes.data.length === 0) throw new Error('Chapter trống')
+      // Prefer local files downloaded in Step 3 — much faster, no network.
+      // Step 3 already applied the skip rule, so localPaths is the filtered
+      // set; panel indices from AI will line up 1:1 with what ffmpeg renders.
+      let images: { base64: string; mimeType: string }[] = []
+      const localList = localPaths.get(chId)
 
-      // 2. Register referer for hotlink CDN
-      if (ws.source?.url) {
-        await window.api.chapter.registerReferer(pgRes.data.map(p => p.url), ws.source.url)
+      if (localList && localList.length > 0) {
+        setPhaseFor(chId, `Đọc ${Math.min(localList.length, 30)} ảnh local...`)
+        const capped = localList.slice(0, Math.min(localList.length, 30))
+        const r = await window.api.chapter.readLocalAsBase64(capped)
+        if (!r.ok) throw new Error(r.error)
+        images = r.data
+      } else {
+        // Fallback: fetch from CDN (only hit if Step 3 was skipped)
+        setPhaseFor(chId, 'Fetching pages từ CDN...')
+        const pgRes = await window.api.plugins.getPages(ws.source!.pluginId, chId)
+        if (!pgRes.ok) throw new Error(pgRes.error)
+        if (pgRes.data.length === 0) throw new Error('Chapter trống')
+        if (ws.source?.url) {
+          await window.api.chapter.registerReferer(pgRes.data.map(p => p.url), ws.source.url)
+        }
+        const excluded = computeExcluded(chId, pgRes.data.length)
+        const filteredPages = pgRes.data.filter((_, i) => !excluded.has(i))
+        if (filteredPages.length === 0) throw new Error('Tất cả page đã bị bỏ — chừa lại ít nhất 1 ảnh')
+        const pagesToUse = filteredPages.slice(0, Math.min(filteredPages.length, 30))
+        for (let i = 0; i < pagesToUse.length; i++) {
+          setPhaseFor(chId, `Tải ảnh ${i + 1}/${pagesToUse.length}...`)
+          const img = await window.api.image.fetch(pagesToUse[i].url, ws.source?.url)
+          if (img.ok) images.push({ base64: img.base64, mimeType: img.contentType })
+        }
       }
-
-      // 3. Drop excluded pages BEFORE fetching base64 — same filter applied at
-      //    render time, so panel indices in the AI's response line up 1:1 with
-      //    what ffmpeg renders.
-      const excluded = computeExcluded(chId, pgRes.data.length)
-      const filteredPages = pgRes.data.filter((_, i) => !excluded.has(i))
-      if (filteredPages.length === 0) throw new Error('Tất cả page đã bị bỏ — chừa lại ít nhất 1 ảnh')
-
-      // 4. Fetch images base64 (cap 30 pages for Gemini Vision context)
-      const pagesToUse = filteredPages.slice(0, Math.min(filteredPages.length, 30))
-      const images: { base64: string; mimeType: string }[] = []
-      for (let i = 0; i < pagesToUse.length; i++) {
-        setPhaseFor(chId, `Tải ảnh ${i + 1}/${pagesToUse.length}...`)
-        const img = await window.api.image.fetch(pagesToUse[i].url, ws.source?.url)
-        if (img.ok) images.push({ base64: img.base64, mimeType: img.contentType })
-      }
-      if (images.length === 0) throw new Error('Không tải được ảnh nào')
+      if (images.length === 0) throw new Error('Không có ảnh nào để gen voiceover')
 
       // 4. Call AI
       setPhaseFor(chId, 'Gen voiceover script...')

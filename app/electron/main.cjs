@@ -288,6 +288,31 @@ ipcMain.handle('chapter:openDownloadsFolder', async (_e, { workspaceId, mangaSlu
 // Download chapter pages. With `workspaceId`, files land inside the workspace
 // folder (everything for one manga in one place). Without, legacy path under
 // downloads/<mSlug>/<cSlug>/ — kept for backward compat.
+// Read already-downloaded local files as base64 — used by AI voiceover gen
+// so it doesn't re-fetch from CDN after Step 3 Download.
+ipcMain.handle('chapter:readLocalAsBase64', async (_e, { paths }) => {
+  try {
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return { ok: false, error: 'Không có path' }
+    }
+    const out = []
+    const mimeByExt = {
+      jpg: 'image/jpeg', jpeg: 'image/jpeg',
+      png: 'image/png', webp: 'image/webp',
+      gif: 'image/gif', bmp: 'image/bmp', avif: 'image/avif'
+    }
+    for (const p of paths) {
+      const buf = fs.readFileSync(p)
+      const ext = path.extname(p).slice(1).toLowerCase()
+      const mimeType = mimeByExt[ext] || sniffMimeFromBuffer(buf) || 'image/jpeg'
+      out.push({ base64: buf.toString('base64'), mimeType })
+    }
+    return { ok: true, data: out }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 ipcMain.handle('chapter:download', async (evt, { pageUrls, referer, mangaSlug, chapterSlug, workspaceId }) => {
   if (!Array.isArray(pageUrls) || pageUrls.length === 0) {
     return { ok: false, error: 'Không có URL ảnh để tải' }
