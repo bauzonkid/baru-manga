@@ -656,10 +656,7 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 
 Rules:
 - 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
-- keyPanels: from within [panelStart..panelEnd], pick 1–5 panel indices that are the KEY visual beats — the panels viewers should actually see on screen while the narration plays. Aim for 2–3 key panels per segment.
-  · Include panels that introduce characters, reveal action, show emotional beats, or close out the segment.
-  · SKIP transition/establishing panels, dialog-only panels with no new visual, and redundant action frames.
-  · keyPanels must be a subset of [panelStart..panelEnd], strictly increasing, no duplicates.
+- keyPanels: from within [panelStart..panelEnd], pick the panels whose visual content matches what this segment's text describes. Skip panels unrelated to the text.
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
