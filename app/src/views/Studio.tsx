@@ -62,7 +62,17 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   const [excludedPages, setExcludedPages] = useState<Map<string, Set<number>>>(new Map())
   const [skipRules, setSkipRules] = useState<Map<string, { fromStart: number; fromEnd: number }>>(new Map())
 
-  // ── Section 3: Voiceover per-chapter ─────────────────────────────────
+  // ── Section 3: Download pages to workspace ───────────────────────────
+  // Pre-download all selected chapter pages to disk so AI gen + ffmpeg
+  // render read from local files (no double network fetch). Backend
+  // `chapter:download` is cache-aware — re-running is cheap.
+  const [localPaths, setLocalPaths] = useState<Map<string, string[]>>(new Map())
+  const [downloadBusy, setDownloadBusy] = useState<Set<string>>(new Set())
+  const [downloadProgress, setDownloadProgress] = useState<Map<string, { i: number; total: number; cached?: number }>>(new Map())
+  const [downloadError, setDownloadError] = useState<Map<string, string>>(new Map())
+  const [activeDownloadChId, setActiveDownloadChId] = useState<string | null>(null)
+
+  // ── Section 4: Voiceover per-chapter ─────────────────────────────────
   const [segments, setSegments] = useState<Map<string, VoiceoverSegment[]>>(new Map())
   const [genBusy, setGenBusy] = useState<Set<string>>(new Set())
   const [genPhase, setGenPhase] = useState<Map<string, string>>(new Map())
@@ -336,6 +346,67 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     }
   }
 
+  // ── Download handlers ─────────────────────────────────────────────────
+
+  const downloadForChapter = async (chId: string) => {
+    if (!ws || !window.api?.plugins || !window.api?.chapter) return
+    if (downloadBusy.has(chId)) return
+
+    const ch = ws.chapters.find(c => c.id === chId)
+    if (!ch) return
+
+    setDownloadBusy(prev => new Set(prev).add(chId))
+    setDownloadError(prev => { const n = new Map(prev); n.delete(chId); return n })
+    setActiveDownloadChId(chId)
+
+    try {
+      const pg = await window.api.plugins.getPages(ws.source!.pluginId, chId)
+      if (!pg.ok) throw new Error(pg.error)
+      if (pg.data.length === 0) throw new Error('Chapter trống')
+
+      const excluded = computeExcluded(chId, pg.data.length)
+      const filtered = pg.data.filter((_, i) => !excluded.has(i))
+      if (filtered.length === 0) throw new Error('Tất cả page đã bị bỏ — chừa lại ít nhất 1 ảnh')
+
+      if (ws.source?.url) {
+        await window.api.chapter.registerReferer(filtered.map(p => p.url), ws.source.url)
+      }
+
+      const dl = await window.api.chapter.download({
+        pageUrls: filtered.map(p => p.url),
+        referer: ws.source?.url,
+        mangaSlug: slugify(ws.title),
+        chapterSlug: `ch${ch.number}`
+      })
+      if (!dl.ok) throw new Error(dl.error)
+      setLocalPaths(prev => new Map(prev).set(chId, dl.data.localPaths))
+    } catch (e: any) {
+      setDownloadError(prev => new Map(prev).set(chId, e?.message || String(e)))
+    } finally {
+      setDownloadBusy(prev => { const n = new Set(prev); n.delete(chId); return n })
+      setActiveDownloadChId(null)
+    }
+  }
+
+  const downloadAllSelected = async () => {
+    for (const ch of selectedList) {
+      if (localPaths.has(ch.id)) continue
+      await downloadForChapter(ch.id)
+    }
+  }
+
+  // Subscribe to download progress, attribute to the currently-active chapter
+  useEffect(() => {
+    if (!window.api?.chapter?.onDownloadProgress) return
+    const off = window.api.chapter.onDownloadProgress((info: { i: number; total: number; file: string; cached: boolean }) => {
+      if (!activeDownloadChId) return
+      setDownloadProgress(prev => new Map(prev).set(activeDownloadChId, { i: info.i, total: info.total }))
+    })
+    return () => off()
+  }, [activeDownloadChId])
+
+  const allSelectedDownloaded = selectedList.length > 0 && selectedList.every(c => (localPaths.get(c.id)?.length ?? 0) > 0)
+
   // ── Voiceover handlers ────────────────────────────────────────────────
 
   const setPhaseFor = (chId: string, p: string) => {
@@ -604,6 +675,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           onSelect={s => setActiveStep(s)}
           hasWorkspace={!!ws}
           chaptersSelected={selectedList.length}
+          allDownloaded={allSelectedDownloaded}
+          downloadedCount={selectedList.filter(c => (localPaths.get(c.id)?.length ?? 0) > 0).length}
           allHaveSegments={allSelectedHaveSegments}
           renderDone={!!renderOutput}
         />
@@ -894,16 +967,110 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
               </div>
               <StepNextBar
                 disabled={selectedList.length === 0}
-                hint={selectedList.length === 0 ? 'Chọn ít nhất 1 chapter để tiếp tục' : `${selectedList.length} chapter sẵn sàng`}
-                label="Tiếp: Voiceover"
+                hint={selectedList.length === 0 ? 'Chọn ít nhất 1 chapter để tiếp tục' : `${selectedList.length} chapter sẵn sàng tải`}
+                label="Tiếp: Tải ảnh"
                 onNext={() => setActiveStep(3)}
               />
             </Section>
           )}
 
-          {/* SECTION 3: Voiceover per-chapter */}
+          {/* SECTION 3: Download to workspace */}
           {activeStep === 3 && ws && selectedList.length > 0 && (
-            <Section number={3} title="Voiceover script">
+            <Section number={3} title="Tải ảnh về workspace">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs text-zinc-500">
+                  {selectedList.filter(c => (localPaths.get(c.id)?.length ?? 0) > 0).length} / {selectedList.length} chapter đã tải
+                </p>
+                <button
+                  onClick={downloadAllSelected}
+                  disabled={downloadBusy.size > 0 || allSelectedDownloaded}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors disabled:opacity-50"
+                  style={{ backgroundColor: '#f43f5e' }}
+                >
+                  {downloadBusy.size > 0
+                    ? `Đang tải ch ${activeDownloadChId ? selectedList.findIndex(c => c.id === activeDownloadChId) + 1 : ''}...`
+                    : allSelectedDownloaded ? 'Đã tải hết' : 'Tải tất cả'}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {selectedList.map(ch => {
+                  const paths = localPaths.get(ch.id)
+                  const busy = downloadBusy.has(ch.id)
+                  const prog = downloadProgress.get(ch.id)
+                  const err = downloadError.get(ch.id)
+                  const done = (paths?.length ?? 0) > 0
+                  return (
+                    <div
+                      key={ch.id}
+                      className="rounded-md px-3 py-2 flex items-center gap-3"
+                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+                    >
+                      <span className="text-sm text-zinc-100 shrink-0">Ch {ch.number}</span>
+                      {ch.title && <span className="text-sm text-zinc-400 truncate flex-1">— {ch.title}</span>}
+                      {!ch.title && <span className="flex-1" />}
+
+                      {busy && prog && (
+                        <span className="text-[11px] text-amber-300 shrink-0">
+                          {prog.i}/{prog.total} pages
+                        </span>
+                      )}
+                      {busy && !prog && (
+                        <span className="text-[11px] text-amber-300 shrink-0 flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
+                          Đang chuẩn bị...
+                        </span>
+                      )}
+                      {err && (
+                        <span className="text-[11px] text-rose-300 truncate" title={err}>{err}</span>
+                      )}
+                      {done && !busy && (
+                        <span className="text-[11px] text-emerald-300 shrink-0 flex items-center gap-1.5">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          {paths!.length} ảnh
+                        </span>
+                      )}
+                      {!busy && !done && !err && (
+                        <button
+                          onClick={() => downloadForChapter(ch.id)}
+                          className="text-[11px] px-2.5 py-1 rounded text-white shrink-0"
+                          style={{ backgroundColor: '#f43f5e' }}
+                        >
+                          Tải
+                        </button>
+                      )}
+                      {(done || err) && !busy && (
+                        <button
+                          onClick={() => downloadForChapter(ch.id)}
+                          className="text-[11px] px-2 py-1 rounded text-zinc-400 hover:text-zinc-100 shrink-0"
+                          style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                          title="Tải lại"
+                        >
+                          ↻
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+
+              <StepNextBar
+                disabled={!allSelectedDownloaded}
+                hint={allSelectedDownloaded
+                  ? `${selectedList.length} chapter đã sẵn trên đĩa`
+                  : `Còn ${selectedList.length - selectedList.filter(c => (localPaths.get(c.id)?.length ?? 0) > 0).length} chapter chưa tải`}
+                label="Tiếp: Voiceover"
+                onNext={() => setActiveStep(4)}
+                onBack={() => setActiveStep(2)}
+              />
+            </Section>
+          )}
+
+          {/* SECTION 4: Voiceover per-chapter (was 3 before adding Download step) */}
+          {activeStep === 4 && ws && selectedList.length > 0 && (
+            <Section number={4} title="Voiceover script">
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs text-zinc-500">
                   {segments.size} / {selectedList.length} chapter đã có script
@@ -1049,15 +1216,15 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 disabled={!allSelectedHaveSegments}
                 hint={allSelectedHaveSegments ? 'Đủ script cho mọi chapter' : `Còn ${selectedList.length - segments.size} chapter chưa gen`}
                 label="Tiếp: Giọng đọc"
-                onNext={() => setActiveStep(4)}
-                onBack={() => setActiveStep(2)}
+                onNext={() => setActiveStep(5)}
+                onBack={() => setActiveStep(3)}
               />
             </Section>
           )}
 
-          {/* SECTION 4: Voice + style */}
-          {activeStep === 4 && ws && selectedList.length > 0 && (
-            <Section number={4} title="Giọng đọc">
+          {/* SECTION 5: Voice + style (was 4) */}
+          {activeStep === 5 && ws && selectedList.length > 0 && (
+            <Section number={5} title="Giọng đọc">
               {!voiceMeta ? (
                 <p className="text-sm text-zinc-500 italic">Đang tải danh sách voice...</p>
               ) : (
@@ -1122,15 +1289,15 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 disabled={false}
                 hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()}`}
                 label="Tiếp: Render"
-                onNext={() => setActiveStep(5)}
-                onBack={() => setActiveStep(3)}
+                onNext={() => setActiveStep(6)}
+                onBack={() => setActiveStep(4)}
               />
             </Section>
           )}
 
-          {/* SECTION 5: Render */}
-          {activeStep === 5 && ws && selectedList.length > 0 && (
-            <Section number={5} title="Render video">
+          {/* SECTION 6: Render (was 5) */}
+          {activeStep === 6 && ws && selectedList.length > 0 && (
+            <Section number={6} title="Render video">
               <div className="space-y-3">
                 {/* Summary */}
                 <div className="text-xs text-zinc-400 flex items-center gap-4 flex-wrap">
@@ -1213,7 +1380,7 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 )}
               </div>
               <StepNextBar
-                onBack={() => setActiveStep(4)}
+                onBack={() => setActiveStep(5)}
                 hint={renderOutput ? 'Hoàn thành — sếp có thể đổi voice/chapter để re-render' : 'Bấm "Render video" ở trên để chạy pipeline'}
               />
             </Section>
@@ -1236,20 +1403,22 @@ function slugify(s: string): string {
 
 // ─── Pipeline sidebar ────────────────────────────────────────────────────
 
-type Step = 1 | 2 | 3 | 4 | 5
+type Step = 1 | 2 | 3 | 4 | 5 | 6
 
 interface PipelineNavProps {
   activeStep: Step
   onSelect: (s: Step) => void
   hasWorkspace: boolean
   chaptersSelected: number
+  allDownloaded: boolean
+  downloadedCount: number
   allHaveSegments: boolean
   renderDone: boolean
 }
 
 type StepStatus = 'locked' | 'ready' | 'done'
 
-function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, allHaveSegments, renderDone }: PipelineNavProps) {
+function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, allDownloaded, downloadedCount, allHaveSegments, renderDone }: PipelineNavProps) {
   // Per-step status:
   //   locked → prerequisite unmet (greyed, click ignored)
   //   ready  → reachable, no payload yet
@@ -1264,15 +1433,19 @@ function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, all
       status: !hasWorkspace ? 'locked' : (chaptersSelected ? 'done' : 'ready')
     },
     {
-      n: 3, title: 'Voiceover', sub: allHaveSegments ? 'Đầy đủ script' : 'Gen + edit',
-      status: !chaptersSelected ? 'locked' : (allHaveSegments ? 'done' : 'ready')
+      n: 3, title: 'Tải ảnh', sub: allDownloaded ? `${downloadedCount} chương tải xong` : (chaptersSelected ? `${downloadedCount}/${chaptersSelected} chương` : 'Đợi chọn chapter'),
+      status: !chaptersSelected ? 'locked' : (allDownloaded ? 'done' : 'ready')
     },
     {
-      n: 4, title: 'Giọng đọc', sub: 'Voice + style',
-      status: !chaptersSelected ? 'locked' : 'ready'
+      n: 4, title: 'Voiceover', sub: allHaveSegments ? 'Đầy đủ script' : 'Gen + edit',
+      status: !allDownloaded ? 'locked' : (allHaveSegments ? 'done' : 'ready')
     },
     {
-      n: 5, title: 'Render', sub: renderDone ? 'Hoàn thành' : (allHaveSegments ? 'Sẵn sàng' : 'Đợi voiceover'),
+      n: 5, title: 'Giọng đọc', sub: 'Voice + style',
+      status: !allDownloaded ? 'locked' : 'ready'
+    },
+    {
+      n: 6, title: 'Render', sub: renderDone ? 'Hoàn thành' : (allHaveSegments ? 'Sẵn sàng' : 'Đợi voiceover'),
       status: !allHaveSegments ? 'locked' : (renderDone ? 'done' : 'ready')
     }
   ]
