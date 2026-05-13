@@ -379,9 +379,12 @@ ipcMain.handle('workspace:loadSegments', async (_e, { workspaceId, chapters }) =
 })
 
 // Scan workspace pages/ folder for already-downloaded chapter files. Returns
-// { [chapterId]: localPaths[] } for chapters whose folder has files. Called
-// on workspace load so the UI knows what's already on disk after a restart —
-// no need to re-download.
+// { [chapterId]: localPaths[] } for chapters whose folder has files.
+//
+// Precedence: if a chapter has `_panels/panel_NNN.*` files (output of the
+// panel-split pipeline), prefer those over the raw `page_NNN.*` strips.
+// That way once the user has run the split step, everything downstream
+// (voiceover gen, render) sees clean individual panels.
 ipcMain.handle('workspace:scanPages', async (_e, { workspaceId, chapters }) => {
   try {
     if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
@@ -390,15 +393,68 @@ ipcMain.handle('workspace:scanPages', async (_e, { workspaceId, chapters }) => {
     for (const ch of (chapters || [])) {
       const slug = safeSlug(`ch${ch.number}`)
       const chDir = path.join(pagesRoot, slug)
-      try {
-        const files = fs.readdirSync(chDir)
-          .filter(f => /^page_\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f))
-          .sort()
-          .map(f => path.join(chDir, f))
-        if (files.length > 0) result[ch.id] = files
-      } catch { /* chapter dir not yet downloaded */ }
+      const panelsDir = path.join(chDir, '_panels')
+      let files = []
+      // 1. Prefer split panels if present
+      if (fs.existsSync(panelsDir)) {
+        try {
+          files = fs.readdirSync(panelsDir)
+            .filter(f => /^panel_\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f))
+            .sort()
+            .map(f => path.join(panelsDir, f))
+        } catch { /* ignore */ }
+      }
+      // 2. Fallback to raw page strips
+      if (files.length === 0) {
+        try {
+          files = fs.readdirSync(chDir)
+            .filter(f => /^page_\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f))
+            .sort()
+            .map(f => path.join(chDir, f))
+        } catch { /* chapter dir not yet downloaded */ }
+      }
+      if (files.length > 0) result[ch.id] = files
     }
     return { ok: true, data: result }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// Run the ghép-rồi-cắt pipeline for a chapter — vstack all page strips,
+// detect whitespace gaps, crop into individual panels. Output lands in
+// <ws>/pages/<chapter-slug>/_panels/. Workspace scanPages then prefers
+// this folder for downstream steps.
+ipcMain.handle('chapter:splitPanels', async (evt, { workspaceId, chapterSlug, opts }) => {
+  try {
+    if (!workspaceId) return { ok: false, error: 'Thiếu workspaceId' }
+    const wsRoot = workspace.workspaceDir(app.getPath('userData'), workspaceId)
+    const cSlug = safeSlug(chapterSlug || 'chapter')
+    const pagesDir = path.join(wsRoot, 'pages', cSlug)
+    const panelsDir = path.join(pagesDir, '_panels')
+    if (!fs.existsSync(pagesDir)) {
+      return { ok: false, error: 'Chapter chưa có pages — tải ở Step 3 trước.' }
+    }
+    const stripFiles = fs.readdirSync(pagesDir)
+      .filter(f => /^page_\d+\.(jpe?g|png|webp)$/i.test(f))
+      .sort()
+      .map(f => path.join(pagesDir, f))
+    if (stripFiles.length === 0) return { ok: false, error: 'Folder pages trống.' }
+
+    // Wipe + recreate panels dir for clean re-run
+    if (fs.existsSync(panelsDir)) {
+      try { fs.rmSync(panelsDir, { recursive: true, force: true }) } catch {}
+    }
+
+    const onProgress = info => evt.sender.send('chapter:splitPanels:progress', info)
+    const panelSplit = require('./video/panelSplit.cjs')
+    const result = await panelSplit.splitChapterPanels({
+      stripPaths: stripFiles,
+      outDir: panelsDir,
+      opts: opts || {},
+      onProgress
+    })
+    return { ok: true, data: { ...result, panelsDir } }
   } catch (e) {
     return { ok: false, error: e.message }
   }
@@ -781,13 +837,11 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
                 .filter(n => Number.isFinite(n) && n >= start && n <= end)
             : []
           keyPanels = Array.from(new Set(keyPanels)).sort((a, b) => a - b)
-          // Cap at 5 — too many panels per segment strobes
           if (keyPanels.length > 5) {
             const sampled = []
             for (let i = 0; i < 5; i++) sampled.push(keyPanels[Math.floor(i * keyPanels.length / 5)])
             keyPanels = sampled
           }
-          // Default: sample up to 3 evenly across the range if AI gave nothing
           if (keyPanels.length === 0) {
             const span = end - start + 1
             const desired = Math.min(span, 3)
@@ -1209,6 +1263,7 @@ ipcMain.handle('video:render', async (evt, opts) => {
         panelStart: seg.panelStart,
         panelEnd: seg.panelEnd,
         keyPanels: Array.isArray(seg.keyPanels) ? seg.keyPanels : null,
+        keyRegions: Array.isArray(seg.keyRegions) ? seg.keyRegions : null,
         audioPath: result.path,
         hash: result.hash,
         cached: result.cached

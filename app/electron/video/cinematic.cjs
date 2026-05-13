@@ -129,6 +129,31 @@ function wrapCaption(text, maxChars = 60) {
  * zoom-pan foreground. Canonical ffmpeg recipe (single-input filter_complex)
  * — proven reliable. Used as building block for multi-panel segments.
  */
+// Probe image dimensions via ffprobe (used when cropping a sub-region
+// of a strip image — need pixel coords for ffmpeg crop filter).
+async function probeImageDimensions(imagePath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(resolveFfprobe(), [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=s=x:p=0',
+      imagePath
+    ], { windowsHide: true })
+    let out = ''
+    let err = ''
+    proc.stdout.on('data', d => { out += d.toString() })
+    proc.stderr.on('data', d => { err += d.toString() })
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`ffprobe img exit ${code}: ${err.slice(0, 200)}`))
+      const m = out.trim().match(/^(\d+)x(\d+)$/)
+      if (!m) return reject(new Error(`ffprobe img bad output: "${out.trim()}"`))
+      resolve({ width: parseInt(m[1], 10), height: parseInt(m[2], 10) })
+    })
+    proc.on('error', reject)
+  })
+}
+
 async function renderSinglePanelClip({ panelPath, duration, fps, dims, outPath }) {
   const { width: W, height: H } = dims
   const frames = Math.max(1, Math.round(duration * fps))
@@ -213,10 +238,6 @@ async function renderSegmentClip(opts) {
   if (!fs.existsSync(audioPath)) throw new Error(`Audio not found: ${audioPath}`)
 
   const totalDur = await probeDuration(audioPath)
-
-  // Use panels caller gave us — AI now picks keyPanels per segment (1–5
-  // panel indices that are the visual beats viewers should see). Caller
-  // already resolved keyPanels → localPaths; no auto-cap here.
   const usePanels = panelPaths
   const perPanelDur = totalDur / usePanels.length
   console.log(`[renderSegmentClip] ${usePanels.length} panels, audio ${totalDur.toFixed(2)}s, perPanelDur ${perPanelDur.toFixed(2)}s, out: ${path.basename(outPath)}`)
@@ -239,7 +260,7 @@ async function renderSegmentClip(opts) {
   const tmpDir = path.join(path.dirname(outPath), `_tmp_${path.basename(outPath, '.mp4')}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
-  // Stage 1: per-panel silent clips (using capped/sampled usePanels)
+  // Stage 1: per-panel silent clips
   const panelClips = []
   for (let i = 0; i < usePanels.length; i++) {
     const pc = path.join(tmpDir, `panel_${String(i).padStart(3, '0')}.mp4`)

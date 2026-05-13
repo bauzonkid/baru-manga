@@ -103,6 +103,27 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   const [downloadError, setDownloadError] = useState<Map<string, string>>(new Map())
   const [activeDownloadChId, setActiveDownloadChId] = useState<string | null>(null)
 
+  // ── Step 3.5: Panel split (ghép strip → cắt panels theo whitespace) ──
+  const [splitBusy, setSplitBusy] = useState<Set<string>>(new Set())
+  const [splitPhase, setSplitPhase] = useState<Map<string, string>>(new Map())
+  const [splitError, setSplitError] = useState<Map<string, string>>(new Map())
+  const [splitResult, setSplitResult] = useState<Map<string, { panelCount: number; sourceStrips: number }>>(new Map())
+  const [activeSplitChId, setActiveSplitChId] = useState<string | null>(null)
+
+  // Subscribe panel-split progress
+  useEffect(() => {
+    if (!window.api?.chapter?.onSplitProgress) return
+    const off = window.api.chapter.onSplitProgress(info => {
+      if (!activeSplitChId) return
+      const label = info.phase === 'concat' ? 'Ghép strip...'
+        : info.phase === 'detect' ? 'Phát hiện gap...'
+        : info.phase === 'crop' ? `Cắt panels ${info.i || 0}/${info.total || '?'}`
+        : info.phase
+      setSplitPhase(prev => new Map(prev).set(activeSplitChId, info.msg || label))
+    })
+    return () => off()
+  }, [activeSplitChId])
+
   // ── Section 4: Voiceover per-chapter ─────────────────────────────────
   const [segments, setSegments] = useState<Map<string, VoiceoverSegment[]>>(new Map())
   const [genBusy, setGenBusy] = useState<Set<string>>(new Set())
@@ -548,6 +569,56 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
     for (const ch of selectedList) {
       if (localPaths.has(ch.id)) continue
       await downloadForChapter(ch.id)
+    }
+  }
+
+  // Run panel-split (ghép-then-cắt) for one chapter — replaces its
+  // raw page strips with detected individual panels under _panels/.
+  // After success, scanPages will pick up _panels/ next time and AI +
+  // render see clean panels.
+  const splitPanelsForChapter = async (chId: string) => {
+    if (!ws || !window.api?.chapter?.splitPanels) return
+    if (splitBusy.has(chId)) return
+    const ch = ws.chapters.find(c => c.id === chId)
+    if (!ch) return
+    if (!localPaths.has(chId)) {
+      setSplitError(prev => new Map(prev).set(chId, 'Chưa tải pages — bấm "Tải" cho chapter này trước.'))
+      return
+    }
+    setSplitBusy(prev => new Set(prev).add(chId))
+    setSplitError(prev => { const n = new Map(prev); n.delete(chId); return n })
+    setActiveSplitChId(chId)
+    try {
+      const r = await window.api.chapter.splitPanels(ws.id, `ch${ch.number}`)
+      if (!r.ok) throw new Error(r.error)
+      setSplitResult(prev => new Map(prev).set(chId, {
+        panelCount: r.data.panelCount,
+        sourceStrips: r.data.sourceStrips
+      }))
+      // Refresh localPaths to point at the new _panels/ files
+      if (window.api?.workspace) {
+        const scan = await window.api.workspace.scanPages(ws.id, [{ id: ch.id, number: ch.number }])
+        if (scan.ok && scan.data[ch.id]) {
+          setLocalPaths(prev => new Map(prev).set(chId, scan.data[ch.id]))
+        }
+      }
+      // Invalidate any existing voiceover for this chapter — panel
+      // indices changed, segments would be stale.
+      invalidateSegments(chId)
+    } catch (e: any) {
+      setSplitError(prev => new Map(prev).set(chId, e?.message || String(e)))
+    } finally {
+      setSplitBusy(prev => { const n = new Set(prev); n.delete(chId); return n })
+      setSplitPhase(prev => { const n = new Map(prev); n.delete(chId); return n })
+      setActiveSplitChId(null)
+    }
+  }
+
+  const splitPanelsForAllSelected = async () => {
+    for (const ch of selectedList) {
+      if (!localPaths.has(ch.id)) continue
+      if (splitResult.has(ch.id)) continue // already split this session
+      await splitPanelsForChapter(ch.id)
     }
   }
 
@@ -1360,6 +1431,90 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   )
                 })}
               </div>
+
+              {/* Panel split block — opt-in pipeline: ghép all strip + cắt theo whitespace */}
+              {allSelectedDownloaded && (
+                <div
+                  className="mt-5 p-3 rounded-md"
+                  style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <div className="text-xs font-medium text-zinc-200">🔪 Tách panels (tuỳ chọn)</div>
+                      <div className="text-[11px] text-zinc-500 mt-0.5">
+                        Ghép tất cả strip thành 1 ảnh dài → phát hiện khoảng trắng → cắt ra panels riêng.
+                        Sau khi tách, AI + render đều dùng panels thay vì strip.
+                      </div>
+                    </div>
+                    <button
+                      onClick={splitPanelsForAllSelected}
+                      disabled={splitBusy.size > 0}
+                      className="px-3 py-1.5 rounded-md text-xs font-medium text-white shrink-0 disabled:opacity-50"
+                      style={{ backgroundColor: '#f43f5e' }}
+                    >
+                      {splitBusy.size > 0 ? `Đang tách...` : 'Tách tất cả'}
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {selectedList.map(ch => {
+                      if (!localPaths.has(ch.id)) return null
+                      const busy = splitBusy.has(ch.id)
+                      const phase = splitPhase.get(ch.id)
+                      const err = splitError.get(ch.id)
+                      const res = splitResult.get(ch.id)
+                      const localCount = localPaths.get(ch.id)?.length ?? 0
+                      return (
+                        <div
+                          key={ch.id}
+                          className="rounded px-3 py-1.5 flex items-center gap-3 text-[11px]"
+                          style={{ backgroundColor: '#18181b' }}
+                        >
+                          <span className="text-zinc-200 shrink-0">Ch {ch.number}</span>
+                          <span className="text-zinc-500 shrink-0">{localCount} files</span>
+                          <span className="flex-1" />
+                          {busy && (
+                            <span className="text-amber-300 flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
+                              {phase || 'Đang xử lý...'}
+                            </span>
+                          )}
+                          {err && (
+                            <span className="text-rose-300 truncate" title={err}>{err}</span>
+                          )}
+                          {res && !busy && (
+                            <span className="text-emerald-300 flex items-center gap-1.5">
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                              {res.sourceStrips} strip → {res.panelCount} panels
+                            </span>
+                          )}
+                          {!busy && !res && (
+                            <button
+                              onClick={() => splitPanelsForChapter(ch.id)}
+                              className="text-[10px] px-2 py-0.5 rounded text-white"
+                              style={{ backgroundColor: '#f43f5e' }}
+                            >
+                              Tách
+                            </button>
+                          )}
+                          {res && !busy && (
+                            <button
+                              onClick={() => splitPanelsForChapter(ch.id)}
+                              className="text-[10px] px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-100"
+                              style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                              title="Tách lại"
+                            >
+                              ↻
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
 
               <StepNextBar
                 disabled={!allSelectedDownloaded}
