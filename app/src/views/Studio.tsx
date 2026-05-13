@@ -1308,28 +1308,31 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                       style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
                     >
                       {/* Chapter header row */}
-                      <div className="px-4 py-2.5 flex items-center gap-3">
+                      <div className="px-4 py-3 flex items-center gap-3">
                         <span className="text-sm font-medium text-zinc-100 shrink-0">Ch {ch.number}</span>
                         {ch.title && <span className="text-sm text-zinc-400 truncate flex-1">— {ch.title}</span>}
                         {!ch.title && <span className="flex-1" />}
 
-                        {list && (
-                          <span className="text-[11px] text-zinc-500 shrink-0">
-                            {list.length} segment
-                          </span>
-                        )}
+                        {list && !busy && (() => {
+                          const totalChars = list.reduce((s, x) => s + (x.text?.length || 0), 0)
+                          const estSec = Math.round(totalChars / 12) // ~12 chars/sec spoken VN
+                          const mm = Math.floor(estSec / 60)
+                          const ss = estSec % 60
+                          return (
+                            <span className="text-[11px] text-zinc-500 shrink-0">
+                              {list.length} seg · ~{mm}:{ss.toString().padStart(2, '0')}
+                            </span>
+                          )
+                        })()}
 
                         {busy ? (
-                          <span className="text-[11px] text-amber-400 flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                            {phaseMsg || 'Đang xử lý...'}
-                          </span>
+                          <span className="text-[11px] text-amber-300 shrink-0">Đang gen...</span>
                         ) : list ? (
                           <>
                             <button
                               onClick={() => setExpandedChapter(expanded ? null : ch.id)}
-                              className="text-[11px] px-2 py-1 rounded text-zinc-400 hover:text-zinc-100"
-                              style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                              className="text-[11px] px-2.5 py-1 rounded font-medium text-white"
+                              style={{ backgroundColor: expanded ? '#27272a' : '#f43f5e' }}
                             >
                               {expanded ? 'Thu gọn' : 'Edit'}
                             </button>
@@ -1345,13 +1348,36 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                         ) : (
                           <button
                             onClick={() => generateForChapter(ch.id)}
-                            className="text-[11px] px-2.5 py-1 rounded text-white"
+                            className="text-[11px] px-3 py-1.5 rounded font-medium text-white"
                             style={{ backgroundColor: '#f43f5e' }}
                           >
                             Gen
                           </button>
                         )}
                       </div>
+
+                      {/* Progress bar (visible during gen) */}
+                      {busy && (
+                        <div
+                          className="px-4 py-3"
+                          style={{ borderTopColor: '#27272a', borderTopWidth: '1px', backgroundColor: '#0a0a0b' }}
+                        >
+                          <div className="flex items-center gap-2 mb-2 text-[11px] text-amber-300">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
+                            <span className="font-medium">{phaseMsg || 'Đang chuẩn bị...'}</span>
+                          </div>
+                          {/* Indeterminate progress bar — animate-pulse opacity + 100% width */}
+                          <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: '#18181b' }}>
+                            <div
+                              className="h-full animate-pulse"
+                              style={{
+                                width: '60%',
+                                background: 'linear-gradient(90deg, transparent, #f59e0b 50%, transparent)'
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
 
                       {/* Error */}
                       {errMsg && (
@@ -1365,52 +1391,74 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
 
                       {/* Segments editor */}
                       {list && expanded && (
-                        <div className="p-3 space-y-2" style={{ borderTopColor: '#27272a', borderTopWidth: '1px' }}>
-                          {list.map((seg, i) => (
-                            <div
-                              key={i}
-                              className="rounded-md p-2.5 flex gap-2"
-                              style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px' }}
-                            >
-                              <div className="flex flex-col gap-1 shrink-0 w-16">
-                                <input
-                                  type="number"
-                                  min={1}
-                                  value={seg.panelStart}
-                                  onChange={e => updateSegment(ch.id, i, { panelStart: Number(e.target.value) || 1 })}
-                                  className="w-full px-1.5 py-1 text-[11px] rounded text-center outline-none"
-                                  style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                                  title="Panel start"
-                                />
-                                <input
-                                  type="number"
-                                  min={1}
-                                  value={seg.panelEnd}
-                                  onChange={e => updateSegment(ch.id, i, { panelEnd: Number(e.target.value) || 1 })}
-                                  className="w-full px-1.5 py-1 text-[11px] rounded text-center outline-none"
-                                  style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                                  title="Panel end"
-                                />
-                              </div>
-                              <textarea
-                                value={seg.text}
-                                onChange={e => updateSegment(ch.id, i, { text: e.target.value })}
-                                rows={2}
-                                className="flex-1 px-2 py-1.5 text-sm rounded outline-none resize-y min-h-[44px]"
-                                style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                              />
-                              <button
-                                onClick={() => removeSegment(ch.id, i)}
-                                className="shrink-0 w-7 h-7 rounded text-zinc-500 hover:text-rose-400 self-start"
-                                title="Xoá segment"
+                        <div className="p-4 space-y-3" style={{ borderTopColor: '#27272a', borderTopWidth: '1px' }}>
+                          {list.map((seg, i) => {
+                            const chars = seg.text?.length || 0
+                            const estSec = Math.round(chars / 12)
+                            const panelSpan = Math.max(1, (seg.panelEnd ?? 0) - (seg.panelStart ?? 0) + 1)
+                            return (
+                              <div
+                                key={i}
+                                className="rounded-lg overflow-hidden"
+                                style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px' }}
                               >
-                                ×
-                              </button>
-                            </div>
-                          ))}
+                                {/* Segment header */}
+                                <div
+                                  className="px-3 py-2 flex items-center justify-between text-[11px]"
+                                  style={{ backgroundColor: 'rgba(0,0,0,0.25)', borderBottomColor: '#27272a', borderBottomWidth: '1px' }}
+                                >
+                                  <div className="flex items-center gap-3 text-zinc-400">
+                                    <span className="font-semibold text-zinc-200">Segment {i + 1}/{list.length}</span>
+                                    <span className="text-zinc-600">·</span>
+                                    <span>Panel <span className="text-zinc-300">{seg.panelStart}</span> – <span className="text-zinc-300">{seg.panelEnd}</span> ({panelSpan} ảnh)</span>
+                                    <span className="text-zinc-600">·</span>
+                                    <span>{chars} chữ ~{estSec}s</span>
+                                  </div>
+                                  <button
+                                    onClick={() => removeSegment(ch.id, i)}
+                                    className="w-6 h-6 rounded text-zinc-500 hover:text-rose-400 flex items-center justify-center"
+                                    title="Xoá segment"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                                {/* Segment body */}
+                                <div className="p-3 flex gap-3">
+                                  <div className="flex flex-col gap-1.5 shrink-0 w-20">
+                                    <label className="text-[10px] uppercase tracking-wider text-zinc-600">Start</label>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      value={seg.panelStart}
+                                      onChange={e => updateSegment(ch.id, i, { panelStart: Math.max(0, Number(e.target.value) || 0) })}
+                                      className="w-full px-2 py-1.5 text-sm rounded text-center outline-none"
+                                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                                    />
+                                    <label className="text-[10px] uppercase tracking-wider text-zinc-600 mt-1">End</label>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      value={seg.panelEnd}
+                                      onChange={e => updateSegment(ch.id, i, { panelEnd: Math.max(0, Number(e.target.value) || 0) })}
+                                      className="w-full px-2 py-1.5 text-sm rounded text-center outline-none"
+                                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                                    />
+                                  </div>
+                                  <textarea
+                                    value={seg.text}
+                                    onChange={e => updateSegment(ch.id, i, { text: e.target.value })}
+                                    rows={4}
+                                    placeholder="Viết text narration cho segment này..."
+                                    className="flex-1 px-3 py-2 text-sm rounded outline-none resize-y leading-relaxed"
+                                    style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#fafafa', minHeight: 96 }}
+                                  />
+                                </div>
+                              </div>
+                            )
+                          })}
                           <button
                             onClick={() => addSegment(ch.id)}
-                            className="w-full py-2 text-xs rounded-md text-zinc-400 hover:text-zinc-100 transition-colors"
+                            className="w-full py-2.5 text-xs rounded-md text-zinc-400 hover:text-zinc-100 transition-colors"
                             style={{ borderColor: '#27272a', borderWidth: '1px', borderStyle: 'dashed' }}
                           >
                             + Thêm segment
