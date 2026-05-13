@@ -924,12 +924,12 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                                         onClick={() => toggleExclude(c.id, i)}
                                         className="relative cursor-pointer w-full flex justify-center group"
                                       >
-                                        <img
-                                          src={p.url}
+                                        <PageImage
+                                          url={p.url}
+                                          referer={ws.source?.url}
                                           alt={`Page ${i + 1}`}
                                           className="max-w-full block transition-opacity"
                                           style={{ opacity: excluded ? 0.18 : 1 }}
-                                          loading="lazy"
                                         />
                                         {excluded ? (
                                           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -1516,6 +1516,65 @@ function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, all
       </div>
     </aside>
   )
+}
+
+// ─── Page image — fetch via main process to bypass adblock ────────────────
+// Chrome inside Electron sometimes throws net::ERR_BLOCKED_BY_CLIENT when a
+// CDN URL contains adblock-trigger keywords ("ad", "banner", "track"...).
+// Routing the image through main process via image:fetch IPC and rendering
+// as a base64 data URL bypasses the renderer's request filter entirely.
+
+interface PageImageProps {
+  url: string
+  referer?: string
+  alt: string
+  className?: string
+  style?: React.CSSProperties
+}
+
+function PageImage({ url, referer, alt, className, style }: PageImageProps) {
+  const [src, setSrc] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let mounted = true
+    if (!window.api?.image) return
+    setSrc(null)
+    setErr(null)
+    window.api.image.fetch(url, referer).then(r => {
+      if (!mounted) return
+      if (r.ok) {
+        setSrc(`data:${r.contentType};base64,${r.base64}`)
+      } else {
+        setErr(r.error)
+      }
+    }).catch(e => {
+      if (mounted) setErr(e?.message || String(e))
+    })
+    return () => { mounted = false }
+  }, [url, referer])
+
+  if (err) {
+    return (
+      <div
+        className={(className || '') + ' bg-rose-950/30 flex items-center justify-center text-rose-300 text-xs p-4'}
+        style={{ ...style, minHeight: 120 }}
+      >
+        Tải ảnh fail: {err}
+      </div>
+    )
+  }
+  if (!src) {
+    return (
+      <div
+        className={(className || '') + ' flex items-center justify-center text-zinc-600 text-xs'}
+        style={{ ...style, minHeight: 200, backgroundColor: '#18181b' }}
+      >
+        Đang tải...
+      </div>
+    )
+  }
+  return <img src={src} alt={alt} className={className} style={style} loading="lazy" />
 }
 
 // ─── Step Next/Back bar ──────────────────────────────────────────────────
