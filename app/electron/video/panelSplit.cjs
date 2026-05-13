@@ -42,24 +42,31 @@ function probeImageDimensions(imagePath) {
 }
 
 /**
- * Vertically concat N images into one tall JPG using ffmpeg vstack filter.
- * vstack requires equal widths; we scale all to the common (max) width first.
+ * Vertically concat N images into one tall image using ffmpeg vstack.
+ *
+ * Output MUST be PNG when total height could exceed 65535px (MJPEG/JPEG
+ * hard limit). For a 79-page manga at 1429px each ≈ 113000px > limit.
+ * Caller passes a `.png` outPath; encoder is auto-selected.
+ *
+ * vstack requires equal widths; we scale all inputs to a common (max) width.
  */
 async function vstackImages(imagePaths, outPath, opts = {}) {
   if (imagePaths.length === 0) throw new Error('vstackImages: no inputs')
   if (imagePaths.length === 1) {
-    // Single input — just copy
     fs.copyFileSync(imagePaths[0], outPath)
     return
   }
 
-  // Find max width — pad/scale all to it
   let maxW = 0
+  let totalH = 0
   for (const p of imagePaths) {
-    const { width } = await probeImageDimensions(p)
+    const { width, height } = await probeImageDimensions(p)
     if (width > maxW) maxW = width
+    totalH += height
   }
   if (maxW === 0) throw new Error('vstackImages: max width is 0')
+
+  console.log(`[vstackImages] ${imagePaths.length} inputs, common width=${maxW}, est total height=${totalH}, out=${path.basename(outPath)}`)
 
   const args = ['-y']
   for (const p of imagePaths) args.push('-i', p)
@@ -67,19 +74,28 @@ async function vstackImages(imagePaths, outPath, opts = {}) {
   const parts = []
   const tags = []
   for (let i = 0; i < N; i++) {
-    // Scale every input to the same width keeping aspect.
     parts.push(`[${i}:v]scale=${maxW}:-1:flags=lanczos,setsar=1[s${i}]`)
     tags.push(`[s${i}]`)
   }
   parts.push(`${tags.join('')}vstack=inputs=${N}[v]`)
-  args.push('-filter_complex', parts.join(';'), '-map', '[v]', '-q:v', String(opts.quality || 5), outPath)
+  args.push('-filter_complex', parts.join(';'), '-map', '[v]')
+
+  // Encoder + quality args. Force PNG codec explicitly to side-step
+  // ffmpeg's auto-pick (which sometimes still tries mjpeg for .png extension
+  // when an early filter introduces yuv).
+  if (/\.png$/i.test(outPath)) {
+    args.push('-c:v', 'png', '-compression_level', '1') // fast write, larger file
+  } else {
+    args.push('-q:v', String(opts.quality || 5))
+  }
+  args.push(outPath)
 
   return new Promise((resolve, reject) => {
     const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
     let err = ''
     proc.stderr.on('data', d => { err += d.toString() })
     proc.on('close', code => {
-      if (code !== 0) return reject(new Error(`vstack exit ${code}: ${err.slice(-500)}`))
+      if (code !== 0) return reject(new Error(`vstack exit ${code}: ${err.slice(-600)}`))
       if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
         return reject(new Error('vstack produced empty/tiny output'))
       }
@@ -206,10 +222,11 @@ async function splitChapterPanels({ stripPaths, outDir, onProgress, opts = {} })
   }
   fs.mkdirSync(outDir, { recursive: true })
 
-  // Stage 1: vstack all strips into one tall image
+  // Stage 1: vstack all strips into one tall image — PNG output because
+  // a 79-page chapter easily exceeds JPEG's 65535px height limit.
   onProgress?.({ phase: 'concat', msg: `Ghép ${stripPaths.length} strip thành 1 ảnh dài...` })
-  const combinedPath = path.join(outDir, '_combined.jpg')
-  await vstackImages(stripPaths, combinedPath, { quality: opts.combineQuality || 5 })
+  const combinedPath = path.join(outDir, '_combined.png')
+  await vstackImages(stripPaths, combinedPath)
 
   // Stage 2: read per-row brightness, find gaps
   onProgress?.({ phase: 'detect', msg: 'Phát hiện khoảng trắng giữa panels...' })
