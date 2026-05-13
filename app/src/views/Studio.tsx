@@ -1854,32 +1854,71 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                       </label>
                     </div>
 
-                    {/* Preview */}
-                    <div
-                      className="rounded-md p-4 flex justify-center"
-                      style={{
-                        background: 'linear-gradient(135deg, #1c1917, #292524)',
-                        height: 110,
-                        alignItems: ws.defaults.subtitlePosition === 'top' ? 'flex-start' : ws.defaults.subtitlePosition === 'middle' ? 'center' : 'flex-end'
-                      }}
-                    >
-                      <div
-                        className="rounded"
-                        style={{
-                          fontSize: Math.max(10, (ws.defaults.subtitleFontSize || 42) / 4),
-                          color: 'white',
-                          padding: ws.defaults.subtitleShowBox === false ? '0' : '4px 10px',
-                          backgroundColor: ws.defaults.subtitleShowBox === false
-                            ? 'transparent'
-                            : `rgba(0,0,0,${ws.defaults.subtitleBoxOpacity ?? 0.65})`,
-                          textShadow: '1px 1px 2px rgba(0,0,0,0.6)',
-                          maxWidth: '80%',
-                          textAlign: 'center'
-                        }}
-                      >
-                        Đại Lăng ngồi giữa rừng tre vắng lặng...
-                      </div>
-                    </div>
+                    {/* Live preview — base render MP4 with CSS-overlaid subtitle */}
+                    {(() => {
+                      // Sample subtitle text = first segment with content,
+                      // so the preview mirrors what'll actually be burned in
+                      const sampleText = (() => {
+                        for (const ch of selectedList) {
+                          const segs = segments.get(ch.id)
+                          const first = segs?.find(s => s.text?.trim())
+                          if (first) return first.text
+                        }
+                        return 'Đại Lăng ngồi giữa rừng tre vắng lặng...'
+                      })()
+                      const subSize = ws.defaults.subtitleFontSize || 42
+                      const subPos = ws.defaults.subtitlePosition || 'bottom'
+                      const subBoxOn = ws.defaults.subtitleShowBox !== false
+                      const subOpacity = ws.defaults.subtitleBoxOpacity ?? 0.65
+                      return (
+                        <div className="space-y-1.5">
+                          <div className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-2">
+                            <span>Preview live</span>
+                            <span className="text-zinc-700">·</span>
+                            <span className="text-zinc-600">Đổi setting trên → cập nhật ngay trên video gốc</span>
+                          </div>
+                          <div
+                            className="rounded-md overflow-hidden relative"
+                            style={{ backgroundColor: '#000', aspectRatio: '16/9', width: '100%' }}
+                          >
+                            <video
+                              key={renderOutput.outPath}
+                              src={`file:///${renderOutput.outPath.replace(/\\/g, '/')}`}
+                              controls
+                              muted
+                              className="w-full h-full"
+                              style={{ display: 'block', objectFit: 'contain' }}
+                            />
+                            <div
+                              className="absolute inset-x-0 flex justify-center px-4 pointer-events-none"
+                              style={{
+                                top: subPos === 'top' ? '5%' : subPos === 'middle' ? '50%' : 'auto',
+                                bottom: subPos === 'bottom' ? '6%' : 'auto',
+                                transform: subPos === 'middle' ? 'translateY(-50%)' : undefined
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontSize: `${Math.max(10, subSize * 0.42)}px`,
+                                  fontWeight: 600,
+                                  color: 'white',
+                                  padding: subBoxOn ? '4px 14px' : '0',
+                                  backgroundColor: subBoxOn ? `rgba(0,0,0,${subOpacity})` : 'transparent',
+                                  textShadow: '1px 1px 2px rgba(0,0,0,0.85), 0 0 4px rgba(0,0,0,0.6)',
+                                  maxWidth: '85%',
+                                  textAlign: 'center',
+                                  borderRadius: 3,
+                                  whiteSpace: 'pre-wrap',
+                                  lineHeight: 1.35
+                                }}
+                              >
+                                {sampleText}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })()}
                   </div>
 
                   {/* Render final button */}
