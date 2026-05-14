@@ -89,6 +89,7 @@ interface Api {
       stripCountMode?: 'auto' | 'fixed'
       stripCountFixed?: number
       aiTemperature?: number
+      rulesText?: string  // user-edited rules bullets (placeholders substituted backend-side)
     }) => Promise<IpcResult<{
       segments: VoiceoverSegment[]
       model: string

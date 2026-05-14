@@ -717,6 +717,27 @@ async function callRouter(model, body) {
 //   critic            — opinionated reviewer, drops a /10 score mid-script.
 //   funny             — playful, witty, light jabs at tropes.
 //   serious           — straight news report tone, minimal embellishment.
+// Default rules — used when caller doesn't pass `rulesText` (kept in sync
+// with DEFAULT_VOICEOVER_RULES in Studio.tsx; if both diverge, frontend
+// wins because it's what the user sees + edits).
+const DEFAULT_RULES_TEMPLATE = `- \${segCountClause} segments total, ordered by STORY CHRONOLOGY (segment 1 = earliest beat in the chapter, last segment = closing). Not every panel has to be covered — skip filler.
+- keyPanels: \${stripCountClause}
+  · Panel indices can be ANY value 0..\${totalPanels - 1}.
+  · They CAN be scattered (e.g. [0, 5, 12]) — pick panels by visual relevance to the narration, NOT by contiguity. Skip filler panels between key beats.
+  · They can repeat across different segments if a panel is so important you want to revisit it.
+  · Order keyPanels ascending (smallest index first within each segment).
+- Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
+- \${persona}
+
+GOOD examples:
+  Single key beat → "keyPanels": [4]
+  Two key shots far apart → "keyPanels": [3, 11]
+  Three beats across chapter → "keyPanels": [0, 5, 12]
+  Action sequence (close together) → "keyPanels": [13, 14, 15]
+BAD examples:
+  Picking 5 sequential filler panels just because they're adjacent → wastes screen time
+  Skipping the actual climax because it's later in the page sequence`
+
 function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style, opts = {}) {
   const segMin = Number.isFinite(opts.segmentsMin) ? opts.segmentsMin : 5
   const segMax = Number.isFinite(opts.segmentsMax) ? opts.segmentsMax : 15
@@ -724,8 +745,8 @@ function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style,
   const stripCountFixed = Number.isFinite(opts.stripCountFixed) ? opts.stripCountFixed : 3
   const segCountClause = `${segMin} to ${segMax}`
   const stripCountClause = stripCountMode === 'fixed'
-    ? `EXACTLY ${stripCountFixed} contiguous strips per segment. Don't return more or fewer.`
-    : `a CONTIGUOUS RUN of 1–5 strip indices, count chosen by AI based on content needs (1 for close-up beat, 2–3 for typical scene, 4–5 for extended action).`
+    ? `EXACTLY ${stripCountFixed} strips per segment. Don't return more or fewer.`
+    : `1–5 strip indices per segment, count chosen by AI based on content needs (1 for close-up beat, 2–3 for typical scene, 4–5 for extended action).`
   const langName = { vi: 'Vietnamese', th: 'Thai', en: 'English', ko: 'Korean', ja: 'Japanese' }[language] || 'English'
   const ctx = []
   if (mangaTitle) ctx.push(`Manga: ${mangaTitle}`)
@@ -769,21 +790,12 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 }
 
 Rules:
-- ${segCountClause} segments total, ordered by STORY CHRONOLOGY (segment 1 = earliest beat in the chapter, last segment = closing). Not every panel has to be covered — skip filler.
-- keyPanels: ${stripCountClause}
-  · Panel indices can be ANY value 0..${totalPanels - 1}.
-  · They CAN be scattered (e.g. [0, 5, 12]) — pick panels by visual relevance to the narration, NOT by contiguity. Skip filler panels between key beats.
-  · They can repeat across different segments if a panel is so important you want to revisit it.
-  · Order keyPanels ascending (smallest index first within each segment).
-
-  GOOD examples:
-    Single key beat → "keyPanels": [4]
-    Two key shots far apart → "keyPanels": [3, 11]
-    Three beats across chapter → "keyPanels": [0, 5, 12]
-    Action sequence (close together) → "keyPanels": [13, 14, 15]
-  BAD examples:
-    Picking 5 sequential filler panels just because they're adjacent → wastes screen time
-    Skipping the actual climax because it's later in the page sequence
+${(opts.rulesText || DEFAULT_RULES_TEMPLATE)
+  .replace(/\$\{segCountClause\}/g, segCountClause)
+  .replace(/\$\{stripCountClause\}/g, stripCountClause)
+  .replace(/\$\{totalPanels\}/g, String(totalPanels))
+  .replace(/\$\{persona\}/g, persona)
+  .replace(/\$\{langName\}/g, langName)}
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
@@ -791,7 +803,7 @@ Rules:
 Return ONLY the JSON object.`
 }
 
-ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, language, mangaTitle, chapterTitle, style, segmentsMin, segmentsMax, stripCountMode, stripCountFixed, aiTemperature }) => {
+ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, language, mangaTitle, chapterTitle, style, segmentsMin, segmentsMax, stripCountMode, stripCountFixed, aiTemperature, rulesText }) => {
   console.log('[ai:voiceoverScript] called', {
     imageCount: Array.isArray(images) ? images.length : 0,
     language, style, mangaTitle, chapterTitle,
@@ -808,7 +820,7 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, languag
   const usePages = images.length > 100 ? sampleEvenly(images, 100) : images
   const declaredPanels = usePages.length
   const content = [{ type: 'text', text: voiceoverPrompt(language, mangaTitle, chapterTitle, declaredPanels, style, {
-    segmentsMin, segmentsMax, stripCountMode, stripCountFixed
+    segmentsMin, segmentsMax, stripCountMode, stripCountFixed, rulesText
   }) }]
   for (const img of usePages) {
     const mt = /^image\/(jpe?g|png|webp|gif|bmp|avif)$/i.test(img.mimeType || '') ? img.mimeType : 'image/jpeg'

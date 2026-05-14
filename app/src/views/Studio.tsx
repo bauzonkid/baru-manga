@@ -36,6 +36,27 @@ const DEFAULT_OPENAI_MODELS = [
   'openai/gpt-4o-mini',
   'openai/gpt-4o'
 ]
+// Default AI voiceover rules — exposed in ⚙ modal so sếp can edit.
+// Placeholders ${segCountClause}, ${stripCountClause}, ${totalPanels},
+// ${persona}, ${langName} are substituted backend-side.
+const DEFAULT_VOICEOVER_RULES = `- \${segCountClause} segments total, ordered by STORY CHRONOLOGY (segment 1 = earliest beat in the chapter, last segment = closing). Not every panel has to be covered — skip filler.
+- keyPanels: \${stripCountClause}
+  · Panel indices can be ANY value 0..\${totalPanels - 1}.
+  · They CAN be scattered (e.g. [0, 5, 12]) — pick panels by visual relevance to the narration, NOT by contiguity. Skip filler panels between key beats.
+  · They can repeat across different segments if a panel is so important you want to revisit it.
+  · Order keyPanels ascending (smallest index first within each segment).
+- Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
+- \${persona}
+
+GOOD examples:
+  Single key beat → "keyPanels": [4]
+  Two key shots far apart → "keyPanels": [3, 11]
+  Three beats across chapter → "keyPanels": [0, 5, 12]
+  Action sequence (close together) → "keyPanels": [13, 14, 15]
+BAD examples:
+  Picking 5 sequential filler panels just because they're adjacent → wastes screen time
+  Skipping the actual climax because it's later in the page sequence`
+
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
   'gemini/gemini-3-flash-preview': 'Gemini 3 Flash (preview)',
   'gemini/gemini-2.5-flash': 'Gemini 2.5 Flash',
@@ -66,6 +87,7 @@ interface WorkspaceData {
     stripCountMode?: 'auto' | 'fixed'  // default 'auto'
     stripCountFixed?: number  // when mode='fixed', force this many strips/segment
     aiTemperature?: number    // default 0.7
+    voiceoverRulesText?: string  // sếp tự edit prompt rules
     // Subtitle
     subtitleEnabled?: boolean
     subtitlePreset?: string
@@ -762,7 +784,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         segmentsMax: wsAny.segmentsMax,
         stripCountMode: wsAny.stripCountMode,
         stripCountFixed: wsAny.stripCountFixed,
-        aiTemperature: wsAny.aiTemperature
+        aiTemperature: wsAny.aiTemperature,
+        rulesText: wsAny.voiceoverRulesText
       } as any)
       console.log('[Voiceover] AI response', aiRes)
       if (!aiRes.ok) throw new Error(aiRes.error || 'AI không trả response')
@@ -1143,6 +1166,34 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   />
                   <span className="text-sm text-zinc-200 w-12 text-center font-mono">{temperature.toFixed(2)}</span>
                 </div>
+              </div>
+
+              {/* Section: Bộ nguyên tắc AI */}
+              <div className="mb-5">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px] uppercase tracking-wider text-zinc-500">Bộ nguyên tắc AI</span>
+                  <button
+                    onClick={() => updateDefault({ voiceoverRulesText: DEFAULT_VOICEOVER_RULES } as any)}
+                    className="text-[10px] text-zinc-400 hover:text-zinc-100"
+                  >
+                    Reset về mặc định
+                  </button>
+                </div>
+                <p className="text-[11px] text-zinc-600 mb-2">
+                  Bullets em ép AI tuân theo khi gen voiceover. Sếp tự edit để đổi behavior.
+                  Placeholders: <code className="text-zinc-400">{'${segCountClause}'}</code>{' '}
+                  <code className="text-zinc-400">{'${stripCountClause}'}</code>{' '}
+                  <code className="text-zinc-400">{'${totalPanels}'}</code>{' '}
+                  <code className="text-zinc-400">{'${persona}'}</code> — em substitute lúc gọi AI.
+                </p>
+                <textarea
+                  value={wsAny.voiceoverRulesText || DEFAULT_VOICEOVER_RULES}
+                  onChange={e => updateDefault({ voiceoverRulesText: e.target.value } as any)}
+                  rows={14}
+                  className="w-full px-3 py-2 text-xs rounded outline-none leading-relaxed font-mono resize-y"
+                  style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7', minHeight: 280 }}
+                  spellCheck={false}
+                />
               </div>
 
               {/* Section: Model fallback order */}
