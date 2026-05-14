@@ -762,29 +762,28 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
   "segments": [
     {
       "text": "<one sentence or short paragraph in ${langName}>",
-      "panelStart": <0-based int, inclusive>,
-      "panelEnd":   <0-based int, inclusive>,
-      "keyPanels":  [<int>, <int>, ...]
+      "keyPanels": [<int>, <int>, ...]
     },
     ...
   ]
 }
 
 Rules:
-- ${segCountClause} segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
+- ${segCountClause} segments total, ordered by STORY CHRONOLOGY (segment 1 = earliest beat in the chapter, last segment = closing). Not every panel has to be covered — skip filler.
 - keyPanels: ${stripCountClause}
-  · MUST be contiguous (strictly increasing by 1): [4,5,6] not [4,7]. No gaps.
-  · Placement follows content: pick the run WHERE the visuals match the text. Can be at start, middle, or end of [panelStart..panelEnd]. Don't default to the first strips.
+  · Panel indices can be ANY value 0..${totalPanels - 1}.
+  · They CAN be scattered (e.g. [0, 5, 12]) — pick panels by visual relevance to the narration, NOT by contiguity. Skip filler panels between key beats.
+  · They can repeat across different segments if a panel is so important you want to revisit it.
+  · Order keyPanels ascending (smallest index first within each segment).
 
-  GOOD examples (when count is AI-decided):
+  GOOD examples:
     Single key beat → "keyPanels": [4]
-    Setup + payoff → "keyPanels": [7, 8]
-    Dialogue scene → "keyPanels": [9, 10, 11]
-    Extended action → "keyPanels": [13, 14, 15, 16, 17]
+    Two key shots far apart → "keyPanels": [3, 11]
+    Three beats across chapter → "keyPanels": [0, 5, 12]
+    Action sequence (close together) → "keyPanels": [13, 14, 15]
   BAD examples:
-    Scattered with gaps → "keyPanels": [0, 1, 6, 10]
-    Every-other-panel → "keyPanels": [3, 5, 7]
-    Always picking the FIRST strips regardless of where the matching content lands
+    Picking 5 sequential filler panels just because they're adjacent → wastes screen time
+    Skipping the actual climax because it's later in the page sequence
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
@@ -857,64 +856,45 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, languag
           }
         }
         const segments = Array.isArray(parsed.segments) ? parsed.segments : []
-        // Sanitize: ensure ints, contiguous, in range. Plus keyPanels:
-        // validate AI's panel picks; if missing/invalid, sample 3 evenly
-        // from the segment's range as a sensible default.
+        // Sanitize — AI now has full freedom over keyPanels:
+        //   - panel indices anywhere in 0..N-1 (scattered OK)
+        //   - no contiguous enforcement
+        //   - no whole-chapter coverage requirement
+        //   - panelStart/End derived from keyPanels for back-compat
         const clean = []
-        let nextStart = 0
+        const fixedCount = stripCountMode === 'fixed' && Number.isFinite(stripCountFixed)
+          ? Math.max(1, Math.min(10, stripCountFixed))
+          : null
         for (const s of segments) {
-          const start = Math.max(nextStart, Math.floor(Number(s.panelStart) || nextStart))
-          const end = Math.min(declaredPanels - 1, Math.max(start, Math.floor(Number(s.panelEnd) || start)))
           const t = String(s.text || '').trim()
           if (!t) continue
 
-          // Validate keyPanels: ints, in [start..end], unique, sorted.
-          // Then ENFORCE contiguity: AI sometimes still scatters picks
-          // despite prompt rule. Find the longest contiguous run inside
-          // the picked set — that's the "cluster" we want.
           let keyPanels = Array.isArray(s.keyPanels)
             ? s.keyPanels
                 .map(n => Math.floor(Number(n)))
-                .filter(n => Number.isFinite(n) && n >= start && n <= end)
+                .filter(n => Number.isFinite(n) && n >= 0 && n < declaredPanels)
             : []
           keyPanels = Array.from(new Set(keyPanels)).sort((a, b) => a - b)
 
-          // Pick longest contiguous run (consecutive integers)
-          if (keyPanels.length > 1) {
-            let bestStart = 0
-            let bestLen = 1
-            let curStart = 0
-            let curLen = 1
-            for (let k = 1; k < keyPanels.length; k++) {
-              if (keyPanels[k] === keyPanels[k - 1] + 1) {
-                curLen++
-                if (curLen > bestLen) { bestLen = curLen; bestStart = curStart }
-              } else {
-                curStart = k
-                curLen = 1
-              }
-            }
-            keyPanels = keyPanels.slice(bestStart, bestStart + bestLen)
+          // Enforce fixed count if user set it; else cap at 5
+          if (fixedCount !== null) {
+            if (keyPanels.length > fixedCount) keyPanels = keyPanels.slice(0, fixedCount)
+          } else if (keyPanels.length > 5) {
+            keyPanels = keyPanels.slice(0, 5)
           }
 
-          if (keyPanels.length > 5) keyPanels = keyPanels.slice(0, 5)
-
-          // If AI gave nothing usable, fall back to a small contiguous run
-          // (3 strips) centered in the segment range.
+          // Fallback when AI gave nothing usable: single middle panel
           if (keyPanels.length === 0) {
-            const span = end - start + 1
-            const desired = Math.min(span, 3)
-            const midStart = start + Math.max(0, Math.floor((span - desired) / 2))
-            for (let i = 0; i < desired; i++) keyPanels.push(midStart + i)
+            keyPanels.push(Math.floor(declaredPanels / 2))
           }
 
-          clean.push({ text: t, panelStart: start, panelEnd: end, keyPanels })
-          nextStart = end + 1
-          if (nextStart >= declaredPanels) break
-        }
-        // If last segment doesn't reach the final panel, extend it.
-        if (clean.length > 0 && clean[clean.length - 1].panelEnd < declaredPanels - 1) {
-          clean[clean.length - 1].panelEnd = declaredPanels - 1
+          // Derive panelStart/End from keyPanels (kept for UI back-compat
+          // — Section 4 editor still shows Start/End inputs around the
+          // range that keyPanels span).
+          const panelStart = keyPanels[0]
+          const panelEnd = keyPanels[keyPanels.length - 1]
+
+          clean.push({ text: t, panelStart, panelEnd, keyPanels })
         }
         if (clean.length === 0) {
           tried.push({ model: m, status: 'no-valid-segments' })
