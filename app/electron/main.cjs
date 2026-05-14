@@ -764,18 +764,20 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 Rules:
 - 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
 - keyPanels: a CONTIGUOUS RUN of strip indices that forms ONE visual scene cluster for this segment.
-  · MUST be contiguous: [3,4,5,6] not [0,1,6,10]. No gaps. Strictly increasing by 1 each step.
-  · Pick the strip cluster whose combined visual best illustrates this segment's narration. Manga usually splits ONE moment across 2–4 consecutive strips (close-up + reaction + action + dialogue). Group them.
-  · Even if the text mentions multiple separate beats, choose the SINGLE best cluster representing the most-relevant scene — don't scatter picks across the range.
-  · Length: usually 2–4 contiguous strips. Occasionally 1 (single beat) or 5 (extended action sequence). Never > 5.
+  · MUST be contiguous: [4,5,6] not [0,1,6,10]. No gaps. Strictly increasing by 1.
+  · CRITICAL — placement follows content: pick the cluster WHERE the visuals best match this segment's text. The cluster can be at the START, MIDDLE, or END of [panelStart..panelEnd] — let the narration content drive placement. DO NOT default to picking the first 3 strips of the range every time.
+  · Manga usually splits ONE moment across 2–4 consecutive strips (close-up + reaction + action + dialogue). Group them.
+  · Length: usually 2–4 strips. Occasionally 1 (single beat) or 5 (extended action). Never > 5.
 
-  GOOD examples:
-    "keyPanels": [3, 4, 5, 6]      ← 4-strip scene cluster
-    "keyPanels": [7, 8]            ← 2-strip moment
-    "keyPanels": [12]              ← single key beat
-  BAD examples (do NOT do this):
-    "keyPanels": [0, 1, 6, 10]     ← scattered, gaps between picks
-    "keyPanels": [3, 5, 7]         ← every-other-panel pattern, not contiguous
+  GOOD examples (notice cluster placement varies based on content):
+    Text describes OPENING of scene → "keyPanels": [0, 1, 2]       ← cluster at start
+    Text describes MID-scene dialogue → "keyPanels": [4, 5, 6]     ← cluster in middle
+    Text describes CLIMAX/closing → "keyPanels": [8, 9, 10]        ← cluster at end
+    Single key beat → "keyPanels": [12]
+  BAD examples:
+    "keyPanels": [0, 1, 6, 10]   ← scattered with gaps
+    Always picking the FIRST 3 strips of every range regardless of where the matching content actually is in the page sequence
+    "keyPanels": [3, 5, 7]       ← every-other-panel, not contiguous
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
