@@ -545,13 +545,18 @@ async function overlaySubtitleOnVideo(opts) {
 }
 
 /**
- * Render a segment as a vertical scroll/pan over the ghép of selected
- * strip images (manhwa-scrolling style). AI picks 1+ strips for the
- * segment; tool vstacks them then ffmpeg vertically pans from top to
- * bottom over the audio duration.
+ * Render a segment from the strip image(s) AI picked.
  *
- * If only 1 short strip is given (scaled height ≤ canvas height), no
- * scroll — falls back to letterbox center.
+ * SINGLE strip → static blur-bg + letterbox center. The strip sits in
+ * the middle of canvas with a blurred copy of itself filling the empty
+ * margins. No scroll. Same look as the original cinematic style.
+ *
+ * MULTIPLE strips → vstack + vertical scroll. Combined image scales to
+ * canvas width, then ffmpeg pans the viewport from top to bottom over
+ * the audio duration. Manhwa-style scrolling.
+ *
+ * Edge case: multi-strip combined that happens to fit canvas → letterbox
+ * with the vstacked image, no scroll (rare for real manga).
  */
 async function renderSegmentScroll(opts) {
   const {
@@ -574,8 +579,47 @@ async function renderSegmentScroll(opts) {
   const { width: W, height: H } = dims
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
-  // Stage 1: vstack selected strips (or copy if just 1) → tall combined image
-  // Use the panelSplit module's vstackImages helper for consistency.
+  // SINGLE-STRIP path — letterbox + blur bg + center. No vstack, no scroll.
+  if (stripPaths.length === 1) {
+    const stripPath = stripPaths[0]
+    const filterComplex = [
+      `[0:v]split[bg][fg]`,
+      `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5,setsar=1,fps=${fps}[bgb]`,
+      `[fg]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,fps=${fps}[fgs]`,
+      `[bgb][fgs]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]`
+    ].join(';')
+
+    const args = [
+      '-y',
+      '-loop', '1', '-framerate', String(fps), '-t', String(totalDur), '-i', stripPath,
+      '-i', audioPath,
+      '-filter_complex', filterComplex,
+      '-map', '[v]', '-map', '1:a',
+      '-r', String(fps),
+      '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-shortest',
+      outPath
+    ]
+    console.log(`[renderSegmentScroll] single-strip static letterbox, audio ${totalDur.toFixed(2)}s, out=${path.basename(outPath)}`)
+
+    await new Promise((resolve, reject) => {
+      const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })
+      let stderr = ''
+      proc.stderr.on('data', d => { stderr += d.toString() })
+      proc.on('close', code => {
+        if (code !== 0) return reject(new Error(`single-strip render exit ${code}\n${stderr.slice(-1500)}`))
+        if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
+          return reject(new Error('single-strip render output missing/tiny'))
+        }
+        resolve()
+      })
+      proc.on('error', reject)
+    })
+    return { path: outPath, duration: totalDur, strips: 1, mode: 'static' }
+  }
+
+  // MULTI-STRIP path — vstack then scroll
   const tmpDir = path.join(path.dirname(outPath), `_tmp_${path.basename(outPath, '.mp4')}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   const combinedPath = path.join(tmpDir, 'combined.png')
@@ -583,21 +627,22 @@ async function renderSegmentScroll(opts) {
   await panelSplit.vstackImages(stripPaths, combinedPath)
 
   const { width: combW, height: combH } = await panelSplit.probeImageDimensions(combinedPath)
-  // Scale combined to canvas width keeping aspect. Compute resulting height.
   const scaledH = Math.round(combH * (W / combW))
 
   let videoFilter
+  let renderMode
   if (scaledH <= H) {
-    // Image fits in canvas — static letterbox center, no scroll
+    // Combined still fits canvas after scale-to-width → letterbox center
     videoFilter = `scale=${W}:-1:flags=lanczos,pad=${W}:${H}:0:(oh-ih)/2:color=black,format=yuv420p`
+    renderMode = 'multi-letterbox'
   } else {
-    // Scroll from y=0 → y=(scaledH-H) linearly over totalDur seconds
-    // ffmpeg crop expr: y='min(t * (scaledH-H) / totalDur, scaledH-H)'
+    // Scroll from y=0 → y=(scaledH-H) linearly over totalDur
     const yExpr = `min(t*(${scaledH}-${H})/${totalDur},${scaledH}-${H})`
     videoFilter = `scale=${W}:-1:flags=lanczos,crop=${W}:${H}:0:'${yExpr}',format=yuv420p`
+    renderMode = 'multi-scroll'
   }
 
-  console.log(`[renderSegmentScroll] ${stripPaths.length} strips, audio ${totalDur.toFixed(2)}s, combined ${combW}×${combH} → scaled ${W}×${scaledH}, mode=${scaledH <= H ? 'static' : 'scroll'}, out=${path.basename(outPath)}`)
+  console.log(`[renderSegmentScroll] ${stripPaths.length} strips, audio ${totalDur.toFixed(2)}s, combined ${combW}×${combH} → scaled ${W}×${scaledH}, mode=${renderMode}, out=${path.basename(outPath)}`)
 
   const args = [
     '-y',
@@ -627,7 +672,7 @@ async function renderSegmentScroll(opts) {
 
   try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
 
-  return { path: outPath, duration: totalDur, strips: stripPaths.length }
+  return { path: outPath, duration: totalDur, strips: stripPaths.length, mode: renderMode }
 }
 
 module.exports = {
