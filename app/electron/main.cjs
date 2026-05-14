@@ -763,12 +763,19 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 
 Rules:
 - 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
-- keyPanels: pick the panels (strip images) needed to convey THIS segment's narration. Important:
-  · Start with strips whose visual directly matches the text.
-  · ALSO include adjacent strips immediately before/after that visually continue the same scene — close-up reactions, action follow-ups, context shots, dialogue swaps inside one moment.
-  · Manga often splits ONE visual moment across 2–3 consecutive strips. Group them together so the rendered scroll feels continuous, not just a single close-up cut out of context.
-  · Skip strips that clearly belong to a different scene or aren't visually relevant.
-  · Result: usually 2–4 contiguous strip indices per segment, occasionally 1 (short single-panel beat) or 5 (extended action sequence).
+- keyPanels: a CONTIGUOUS RUN of strip indices that forms ONE visual scene cluster for this segment.
+  · MUST be contiguous: [3,4,5,6] not [0,1,6,10]. No gaps. Strictly increasing by 1 each step.
+  · Pick the strip cluster whose combined visual best illustrates this segment's narration. Manga usually splits ONE moment across 2–4 consecutive strips (close-up + reaction + action + dialogue). Group them.
+  · Even if the text mentions multiple separate beats, choose the SINGLE best cluster representing the most-relevant scene — don't scatter picks across the range.
+  · Length: usually 2–4 contiguous strips. Occasionally 1 (single beat) or 5 (extended action sequence). Never > 5.
+
+  GOOD examples:
+    "keyPanels": [3, 4, 5, 6]      ← 4-strip scene cluster
+    "keyPanels": [7, 8]            ← 2-strip moment
+    "keyPanels": [12]              ← single key beat
+  BAD examples (do NOT do this):
+    "keyPanels": [0, 1, 6, 10]     ← scattered, gaps between picks
+    "keyPanels": [3, 5, 7]         ← every-other-panel pattern, not contiguous
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
@@ -840,24 +847,44 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
           const t = String(s.text || '').trim()
           if (!t) continue
 
-          // Validate keyPanels: ints, in [start..end], unique, sorted
+          // Validate keyPanels: ints, in [start..end], unique, sorted.
+          // Then ENFORCE contiguity: AI sometimes still scatters picks
+          // despite prompt rule. Find the longest contiguous run inside
+          // the picked set — that's the "cluster" we want.
           let keyPanels = Array.isArray(s.keyPanels)
             ? s.keyPanels
                 .map(n => Math.floor(Number(n)))
                 .filter(n => Number.isFinite(n) && n >= start && n <= end)
             : []
           keyPanels = Array.from(new Set(keyPanels)).sort((a, b) => a - b)
-          if (keyPanels.length > 5) {
-            const sampled = []
-            for (let i = 0; i < 5; i++) sampled.push(keyPanels[Math.floor(i * keyPanels.length / 5)])
-            keyPanels = sampled
+
+          // Pick longest contiguous run (consecutive integers)
+          if (keyPanels.length > 1) {
+            let bestStart = 0
+            let bestLen = 1
+            let curStart = 0
+            let curLen = 1
+            for (let k = 1; k < keyPanels.length; k++) {
+              if (keyPanels[k] === keyPanels[k - 1] + 1) {
+                curLen++
+                if (curLen > bestLen) { bestLen = curLen; bestStart = curStart }
+              } else {
+                curStart = k
+                curLen = 1
+              }
+            }
+            keyPanels = keyPanels.slice(bestStart, bestStart + bestLen)
           }
+
+          if (keyPanels.length > 5) keyPanels = keyPanels.slice(0, 5)
+
+          // If AI gave nothing usable, fall back to a small contiguous
+          // sample centered in the segment range.
           if (keyPanels.length === 0) {
             const span = end - start + 1
             const desired = Math.min(span, 3)
-            for (let i = 0; i < desired; i++) {
-              keyPanels.push(start + Math.floor(i * span / desired))
-            }
+            const midStart = start + Math.max(0, Math.floor((span - desired) / 2))
+            for (let i = 0; i < desired; i++) keyPanels.push(midStart + i)
           }
 
           clean.push({ text: t, panelStart: start, panelEnd: end, keyPanels })
