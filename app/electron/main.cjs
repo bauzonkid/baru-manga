@@ -542,6 +542,20 @@ ipcMain.handle('plugins:openByUrl', async (_e, { url }) => {
   return { ok: false, error: 'Không nhận diện được URL (chỉ hỗ trợ mangadex.org/title/... hoặc /chapter/...)' }
 })
 
+// Open RULES.md (full tool workflow + AI rules doc) in the default
+// markdown/text editor.
+ipcMain.handle('app:openRulesDoc', async () => {
+  try {
+    const docPath = path.join(__dirname, 'RULES.md')
+    if (!fs.existsSync(docPath)) return { ok: false, error: 'RULES.md not found' }
+    const err = await shell.openPath(docPath)
+    if (err) return { ok: false, error: err }
+    return { ok: true, data: { path: docPath } }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 // Open user plugins folder in OS file explorer. Creates the folder first
 // so even on a fresh install the user lands somewhere they can drop files.
 ipcMain.handle('plugins:openUserFolder', async () => {

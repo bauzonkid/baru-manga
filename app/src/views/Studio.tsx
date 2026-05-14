@@ -1016,6 +1016,14 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => (window.api?.plugins as any)?.openRulesDoc?.()}
+            className="text-xs text-zinc-400 hover:text-zinc-100 px-3 py-1.5 rounded transition-colors"
+            style={{ borderColor: '#27272a', borderWidth: '1px' }}
+            title="Mở RULES.md — quy trình + nguyên tắc AI + chỗ chỉnh sửa"
+          >
+            📋 Rules
+          </button>
+          <button
             onClick={() => window.api?.plugins?.openUserFolder?.()}
             className="text-xs text-zinc-400 hover:text-zinc-100 px-3 py-1.5 rounded transition-colors"
             style={{ borderColor: '#27272a', borderWidth: '1px' }}

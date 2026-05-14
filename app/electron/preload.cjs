@@ -11,7 +11,8 @@ contextBridge.exposeInMainWorld('api', {
     getPages: (pluginId, chapterId) =>
       ipcRenderer.invoke('plugins:getPages', { pluginId, chapterId }),
     openByUrl: url => ipcRenderer.invoke('plugins:openByUrl', { url }),
-    openUserFolder: () => ipcRenderer.invoke('plugins:openUserFolder')
+    openUserFolder: () => ipcRenderer.invoke('plugins:openUserFolder'),
+    openRulesDoc: () => ipcRenderer.invoke('app:openRulesDoc')
   },
   image: {
     fetch: (url, referer) => ipcRenderer.invoke('image:fetch', { url, referer })

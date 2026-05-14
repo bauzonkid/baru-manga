@@ -50,6 +50,7 @@ interface Api {
       | { pluginId: string; kind: 'chapter'; manga: MangaResult | null; chapter: Chapter }
     >>
     openUserFolder: () => Promise<IpcResult<{ dir: string }>>
+    openRulesDoc: () => Promise<IpcResult<{ path: string }>>
   }
   image: {
     fetch: (url: string, referer?: string) => Promise<{ ok: true; contentType: string; base64: string } | { ok: false; error: string }>
