@@ -2567,10 +2567,20 @@ interface StepNextBarProps {
 }
 
 function StepNextBar({ onNext, onBack, label, hint, disabled }: StepNextBarProps) {
+  // sticky bottom-0 pins the bar to the bottom of main panel's scroll
+  // viewport — buttons stay reachable no matter how long the section is.
+  // Negative margins (-mx-5 -mb-5 px-5 pb-5) negate the Section's p-5
+  // padding so the bar spans edge-to-edge of the card.
   return (
     <div
-      className="mt-5 pt-4 flex items-center gap-3"
-      style={{ borderTopColor: '#27272a', borderTopWidth: '1px' }}
+      className="sticky bottom-0 z-10 mt-5 -mx-5 -mb-5 px-5 pt-3 pb-4 flex items-center gap-3 backdrop-blur-sm"
+      style={{
+        backgroundColor: 'rgba(24, 24, 27, 0.92)',
+        borderTopColor: '#27272a',
+        borderTopWidth: '1px',
+        borderBottomLeftRadius: '12px',
+        borderBottomRightRadius: '12px'
+      }}
     >
       {onBack && (
         <button
