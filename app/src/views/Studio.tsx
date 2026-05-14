@@ -34,6 +34,7 @@ interface WorkspaceData {
     model: string
     language: string
     style?: string
+    aiModel?: string  // AI model for voiceover gen
     subtitleEnabled?: boolean
     subtitlePreset?: string
     subtitleFontSize?: number
@@ -712,7 +713,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         language: ws.defaults.language,
         mangaTitle: ws.title,
         chapterTitle: `Chapter ${ch.number}${ch.title ? ' — ' + ch.title : ''}`,
-        style: (ws.defaults.style as 'recap' | 'critic' | 'funny' | 'serious') || 'recap'
+        style: (ws.defaults.style as 'recap' | 'critic' | 'funny' | 'serious') || 'recap',
+        model: ws.defaults.aiModel || undefined
       })
       console.log('[Voiceover] AI response', aiRes)
       if (!aiRes.ok) throw new Error(aiRes.error || 'AI không trả response')
@@ -1547,26 +1549,52 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           {/* SECTION 4: Voiceover per-chapter (was 3 before adding Download step) */}
           {activeStep === 4 && ws && selectedList.length > 0 && (
             <Section number={4} title="Voiceover script">
-              {/* Style picker — controls AI narrator persona for THIS section's gen */}
+              {/* Style + Model picker — controls AI narrator persona + model */}
               <div
-                className="mb-4 p-3 rounded-md flex items-center gap-3 flex-wrap"
+                className="mb-4 p-3 rounded-md space-y-2.5"
                 style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
               >
-                <span className="text-[11px] uppercase tracking-wider text-zinc-500 shrink-0">Phong cách script</span>
-                <select
-                  value={(['recap','critic','funny','serious'].includes(ws.defaults.style || '') ? ws.defaults.style : 'recap')}
-                  onChange={e => updateDefault({ style: e.target.value })}
-                  className="px-2.5 py-1.5 text-sm rounded-md outline-none flex-1 min-w-[260px]"
-                  style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                >
-                  <option value="recap">Recap kịch tính — HBO documentary narrator</option>
-                  <option value="critic">Critic chấm điểm — phê phán + điểm /10 giữa script</option>
-                  <option value="funny">Hài hước — witty, jab tropes</option>
-                  <option value="serious">Nghiêm túc — straight news report</option>
-                </select>
-                <span className="text-[10px] text-zinc-600 shrink-0">
-                  Đổi style → bấm ↻ regen chapter để áp dụng
-                </span>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-[11px] uppercase tracking-wider text-zinc-500 shrink-0 w-28">Phong cách</span>
+                  <select
+                    value={(['recap','critic','funny','serious'].includes(ws.defaults.style || '') ? ws.defaults.style : 'recap')}
+                    onChange={e => updateDefault({ style: e.target.value })}
+                    className="px-2.5 py-1.5 text-sm rounded-md outline-none flex-1 min-w-[260px]"
+                    style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                  >
+                    <option value="recap">Recap kịch tính — HBO documentary narrator</option>
+                    <option value="critic">Critic chấm điểm — phê phán + điểm /10 giữa script</option>
+                    <option value="funny">Hài hước — witty, jab tropes</option>
+                    <option value="serious">Nghiêm túc — straight news report</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-[11px] uppercase tracking-wider text-zinc-500 shrink-0 w-28">Model AI</span>
+                  <select
+                    value={ws.defaults.aiModel || 'gemini/gemini-3-flash-preview'}
+                    onChange={e => updateDefault({ aiModel: e.target.value } as any)}
+                    className="px-2.5 py-1.5 text-sm rounded-md outline-none flex-1 min-w-[260px]"
+                    style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                  >
+                    <optgroup label="Gemini (free tier OK)">
+                      <option value="gemini/gemini-3-flash-preview">Gemini 3 Flash (preview)</option>
+                      <option value="gemini/gemini-2.5-flash">Gemini 2.5 Flash</option>
+                      <option value="gemini/gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite (preview)</option>
+                      <option value="gemini/gemini-2.0-flash-lite">Gemini 2.0 Flash Lite</option>
+                      <option value="gemini/gemini-3.1-pro-preview">Gemini 3.1 Pro (preview, slower)</option>
+                    </optgroup>
+                    <optgroup label="OpenAI (paid)">
+                      <option value="openai/gpt-4o-mini">GPT-4o mini</option>
+                      <option value="openai/gpt-4o">GPT-4o</option>
+                    </optgroup>
+                  </select>
+                  <span className="text-[10px] text-zinc-600 shrink-0">
+                    Fallback chain tự rớt xuống model kế nếu rate-limit
+                  </span>
+                </div>
+                <div className="text-[10px] text-zinc-600">
+                  Đổi style/model → bấm ↻ regen chapter để áp dụng
+                </div>
               </div>
 
               {/* Aggregate error banner — bubble up any chapter-level gen error */}
