@@ -23,6 +23,29 @@ interface StudioProps {
   onOpenLegacy: () => void
 }
 
+// Default fallback order per provider. User can reorder via modal in
+// Section 4 — first model tried first, falls through to next on rate-limit.
+const DEFAULT_GEMINI_MODELS = [
+  'gemini/gemini-3-flash-preview',
+  'gemini/gemini-2.5-flash',
+  'gemini/gemini-3.1-flash-lite-preview',
+  'gemini/gemini-2.0-flash-lite',
+  'gemini/gemini-3.1-pro-preview'
+]
+const DEFAULT_OPENAI_MODELS = [
+  'openai/gpt-4o-mini',
+  'openai/gpt-4o'
+]
+const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  'gemini/gemini-3-flash-preview': 'Gemini 3 Flash (preview)',
+  'gemini/gemini-2.5-flash': 'Gemini 2.5 Flash',
+  'gemini/gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash Lite (preview)',
+  'gemini/gemini-2.0-flash-lite': 'Gemini 2.0 Flash Lite',
+  'gemini/gemini-3.1-pro-preview': 'Gemini 3.1 Pro (preview, slower)',
+  'openai/gpt-4o-mini': 'GPT-4o mini',
+  'openai/gpt-4o': 'GPT-4o'
+}
+
 interface WorkspaceData {
   id: string
   title: string
@@ -34,7 +57,9 @@ interface WorkspaceData {
     model: string
     language: string
     style?: string
-    aiModel?: string  // AI model for voiceover gen
+    aiProvider?: 'gemini' | 'openai'
+    geminiModelOrder?: string[]
+    openaiModelOrder?: string[]
     subtitleEnabled?: boolean
     subtitlePreset?: string
     subtitleFontSize?: number
@@ -140,6 +165,9 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   // active step renders. Step 1 is always reachable. Steps 2-5 require the
   // workspace + a chapter selection (computed inside PipelineNav).
   const [activeStep, setActiveStep] = useState<Step>(1)
+
+  // Model-order modal state (Section 4 ⚙ button)
+  const [showModelOrder, setShowModelOrder] = useState(false)
 
   // ── Section 4: Voice meta ────────────────────────────────────────────
   interface VoiceMeta {
@@ -708,14 +736,22 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
       // 4. Call AI
       setPhaseFor(chId, `Gen voiceover (${images.length} ảnh)...`)
       console.log('[Voiceover] calling AI', { imageCount: images.length, lang: ws.defaults.language, style: ws.defaults.style })
+      // Build model fallback list from current provider + user-customized order
+      const wsAny = ws.defaults as any
+      const provider = wsAny.aiProvider || 'gemini'
+      const orderForProvider = provider === 'openai'
+        ? (Array.isArray(wsAny.openaiModelOrder) && wsAny.openaiModelOrder.length > 0 ? wsAny.openaiModelOrder : DEFAULT_OPENAI_MODELS)
+        : (Array.isArray(wsAny.geminiModelOrder) && wsAny.geminiModelOrder.length > 0 ? wsAny.geminiModelOrder : DEFAULT_GEMINI_MODELS)
+
       const aiRes = await window.api.ai.voiceoverScript({
         images,
         language: ws.defaults.language,
         mangaTitle: ws.title,
         chapterTitle: `Chapter ${ch.number}${ch.title ? ' — ' + ch.title : ''}`,
         style: (ws.defaults.style as 'recap' | 'critic' | 'funny' | 'serious') || 'recap',
-        model: ws.defaults.aiModel || undefined
-      })
+        model: orderForProvider[0],
+        models: orderForProvider
+      } as any)
       console.log('[Voiceover] AI response', aiRes)
       if (!aiRes.ok) throw new Error(aiRes.error || 'AI không trả response')
       if (!aiRes.data || !Array.isArray(aiRes.data.segments) || aiRes.data.segments.length === 0) {
@@ -970,6 +1006,91 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           </button>
         </div>
       </header>
+
+      {/* ── Model-order modal ────────────────────────────────────────── */}
+      {showModelOrder && ws && (() => {
+        const wsAny = ws.defaults as any
+        const provider = (wsAny.aiProvider || 'gemini') as 'gemini' | 'openai'
+        const stored = provider === 'openai' ? wsAny.openaiModelOrder : wsAny.geminiModelOrder
+        const defaults = provider === 'openai' ? DEFAULT_OPENAI_MODELS : DEFAULT_GEMINI_MODELS
+        const list: string[] = Array.isArray(stored) && stored.length > 0 ? [...stored] : [...defaults]
+        const save = (newList: string[]) => {
+          updateDefault(provider === 'openai' ? { openaiModelOrder: newList } as any : { geminiModelOrder: newList } as any)
+        }
+        const move = (idx: number, dir: -1 | 1) => {
+          const target = idx + dir
+          if (target < 0 || target >= list.length) return
+          const next = list.slice()
+          ;[next[idx], next[target]] = [next[target], next[idx]]
+          save(next)
+        }
+        const resetDefaults = () => save(defaults)
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-6"
+            style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}
+            onClick={() => setShowModelOrder(false)}
+          >
+            <div
+              className="rounded-xl p-5 max-w-md w-full"
+              style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px' }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-zinc-100">Thứ tự fallback ({provider})</h2>
+                <button
+                  onClick={() => setShowModelOrder(false)}
+                  className="text-zinc-500 hover:text-zinc-100 text-lg"
+                >×</button>
+              </div>
+              <p className="text-[11px] text-zinc-500 mb-3">
+                Model đầu tiên được gọi trước. Nếu rate-limit/error sẽ rớt xuống model kế.
+              </p>
+              <div className="space-y-1.5">
+                {list.map((m, i) => (
+                  <div
+                    key={m}
+                    className="flex items-center gap-2 px-2.5 py-2 rounded-md"
+                    style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+                  >
+                    <span className="text-[11px] text-zinc-500 shrink-0 w-5 text-center">{i + 1}</span>
+                    <span className="text-sm text-zinc-200 flex-1 truncate">{MODEL_DISPLAY_NAMES[m] || m}</span>
+                    <button
+                      onClick={() => move(i, -1)}
+                      disabled={i === 0}
+                      className="w-7 h-7 rounded text-zinc-400 hover:text-white disabled:opacity-30"
+                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                      title="Lên"
+                    >↑</button>
+                    <button
+                      onClick={() => move(i, 1)}
+                      disabled={i === list.length - 1}
+                      className="w-7 h-7 rounded text-zinc-400 hover:text-white disabled:opacity-30"
+                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                      title="Xuống"
+                    >↓</button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center justify-between mt-4">
+                <button
+                  onClick={resetDefaults}
+                  className="text-[11px] text-zinc-400 hover:text-zinc-100"
+                >
+                  Reset về mặc định
+                </button>
+                <button
+                  onClick={() => setShowModelOrder(false)}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium text-white"
+                  style={{ backgroundColor: '#f43f5e' }}
+                >
+                  Xong
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── Sidebar + Content ────────────────────────────────────────── */}
       <div className="flex-1 flex overflow-hidden">
@@ -1570,25 +1691,24 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                     </select>
                   </label>
                   <label className="flex items-center gap-2 flex-1 min-w-[260px]">
-                    <span className="text-[11px] uppercase tracking-wider text-zinc-500 shrink-0">Model AI</span>
+                    <span className="text-[11px] uppercase tracking-wider text-zinc-500 shrink-0">Provider</span>
                     <select
-                      value={ws.defaults.aiModel || 'gemini/gemini-3-flash-preview'}
-                      onChange={e => updateDefault({ aiModel: e.target.value } as any)}
+                      value={(ws.defaults as any).aiProvider || 'gemini'}
+                      onChange={e => updateDefault({ aiProvider: e.target.value } as any)}
                       className="px-2.5 py-1.5 text-sm rounded-md outline-none flex-1"
                       style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
                     >
-                      <optgroup label="Gemini (free tier OK)">
-                        <option value="gemini/gemini-3-flash-preview">Gemini 3 Flash (preview)</option>
-                        <option value="gemini/gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini/gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite (preview)</option>
-                        <option value="gemini/gemini-2.0-flash-lite">Gemini 2.0 Flash Lite</option>
-                        <option value="gemini/gemini-3.1-pro-preview">Gemini 3.1 Pro (preview, slower)</option>
-                      </optgroup>
-                      <optgroup label="OpenAI (paid)">
-                        <option value="openai/gpt-4o-mini">GPT-4o mini</option>
-                        <option value="openai/gpt-4o">GPT-4o</option>
-                      </optgroup>
+                      <option value="gemini">Gemini (free tier OK)</option>
+                      <option value="openai">OpenAI (paid)</option>
                     </select>
+                    <button
+                      onClick={() => setShowModelOrder(true)}
+                      className="text-xs px-2.5 py-1.5 rounded-md text-zinc-300 hover:text-white shrink-0"
+                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                      title="Tuỳ chỉnh thứ tự fallback model"
+                    >
+                      ⚙ Thứ tự
+                    </button>
                   </label>
                 </div>
                 <div className="text-[10px] text-zinc-600 mt-2">

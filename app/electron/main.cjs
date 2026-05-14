@@ -785,7 +785,7 @@ Rules:
 Return ONLY the JSON object.`
 }
 
-ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, mangaTitle, chapterTitle, style }) => {
+ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, language, mangaTitle, chapterTitle, style }) => {
   console.log('[ai:voiceoverScript] called', {
     imageCount: Array.isArray(images) ? images.length : 0,
     language, style, mangaTitle, chapterTitle,
@@ -814,7 +814,17 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
     stream: false
   }
 
-  const candidates = model ? [model, ...VISION_FALLBACK.filter(m => m !== model)] : VISION_FALLBACK
+  // Build candidates list: caller-supplied `models` array (user-customized
+  // fallback order from Section 4 ⚙ modal) takes priority. Else single
+  // `model` + VISION_FALLBACK. Else just VISION_FALLBACK.
+  let candidates
+  if (Array.isArray(models) && models.length > 0) {
+    candidates = models
+  } else if (model) {
+    candidates = [model, ...VISION_FALLBACK.filter(m => m !== model)]
+  } else {
+    candidates = VISION_FALLBACK
+  }
   const tried = []
   for (const m of candidates) {
     try {

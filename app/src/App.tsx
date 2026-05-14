@@ -78,6 +78,7 @@ interface Api {
     listModels: () => Promise<IpcResult<{ all: string[]; visionCapable: string[] }>>
     voiceoverScript: (opts: {
       model?: string
+      models?: string[]   // ordered fallback list — user-customized via Section 4 ⚙
       images: { base64: string; mimeType: string }[]
       language: string
       mangaTitle?: string
