@@ -764,20 +764,22 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 
 Rules:
 - 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
-- keyPanels: the FEW strips (usually 1, sometimes 2) that visually nail this segment. Pick the most DETAILED, on-point strip for the narration — don't pad with extras.
-  · Default to 1 strip. Use 2 only when one strip alone doesn't capture the moment (e.g. action + reaction shot side-by-side).
-  · 3 strips max — only for extended sequences where one frame can't tell the story.
-  · If using 2 or 3, they MUST be contiguous: [4,5] not [4,7]. Strictly increasing by 1.
-  · Placement follows content: pick the strip(s) WHERE the visuals match the text. Could be at the start, middle, or end of [panelStart..panelEnd]. DO NOT default to the first strip of each range.
+- keyPanels: a CONTIGUOUS RUN of 1–5 strip indices forming the visuals for this segment. Let the content decide how many:
+  · 1 strip — single close-up beat, one reaction shot, one establishing frame
+  · 2–3 strips — typical scene cluster (setup + payoff, dialogue + reaction)
+  · 4–5 strips — extended action sequence or multi-beat moment that needs more frames to land
+  · MUST be contiguous (strictly increasing by 1): [4,5,6] not [4,7]. No gaps.
+  · Placement follows content: pick the run WHERE the visuals match the text. Can be at start, middle, or end of [panelStart..panelEnd]. Don't default to the first strips.
 
-  GOOD examples (smaller = better):
-    Single key beat → "keyPanels": [4]              ← 1 strip, the detail shot
-    Action + reaction → "keyPanels": [7, 8]         ← 2 contiguous
-    Extended sequence (rare) → "keyPanels": [9, 10, 11]
+  GOOD examples (count varies by what content needs):
+    Single key beat → "keyPanels": [4]
+    Setup + payoff → "keyPanels": [7, 8]
+    Dialogue scene → "keyPanels": [9, 10, 11]
+    Extended action → "keyPanels": [13, 14, 15, 16, 17]
   BAD examples:
-    Padding with extras → "keyPanels": [0, 1, 2, 3, 4]
-    Scattered → "keyPanels": [0, 1, 6, 10]
-    Always picking the FIRST strips regardless of where the matching content is
+    Scattered with gaps → "keyPanels": [0, 1, 6, 10]
+    Every-other-panel → "keyPanels": [3, 5, 7]
+    Always picking the FIRST strips regardless of where the matching content lands
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
@@ -888,14 +890,15 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, languag
             keyPanels = keyPanels.slice(bestStart, bestStart + bestLen)
           }
 
-          if (keyPanels.length > 3) keyPanels = keyPanels.slice(0, 3)
+          if (keyPanels.length > 5) keyPanels = keyPanels.slice(0, 5)
 
-          // If AI gave nothing usable, fall back to a single strip near
-          // the middle of the segment range.
+          // If AI gave nothing usable, fall back to a small contiguous run
+          // (3 strips) centered in the segment range.
           if (keyPanels.length === 0) {
             const span = end - start + 1
-            const mid = start + Math.floor(span / 2)
-            keyPanels.push(mid)
+            const desired = Math.min(span, 3)
+            const midStart = start + Math.max(0, Math.floor((span - desired) / 2))
+            for (let i = 0; i < desired; i++) keyPanels.push(midStart + i)
           }
 
           clean.push({ text: t, panelStart: start, panelEnd: end, keyPanels })
