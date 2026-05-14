@@ -763,7 +763,12 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 
 Rules:
 - 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
-- keyPanels: from within [panelStart..panelEnd], pick the panels whose visual content matches what this segment's text describes. Skip panels unrelated to the text.
+- keyPanels: pick the panels (strip images) needed to convey THIS segment's narration. Important:
+  · Start with strips whose visual directly matches the text.
+  · ALSO include adjacent strips immediately before/after that visually continue the same scene — close-up reactions, action follow-ups, context shots, dialogue swaps inside one moment.
+  · Manga often splits ONE visual moment across 2–3 consecutive strips. Group them together so the rendered scroll feels continuous, not just a single close-up cut out of context.
+  · Skip strips that clearly belong to a different scene or aren't visually relevant.
+  · Result: usually 2–4 contiguous strip indices per segment, occasionally 1 (short single-panel beat) or 5 (extended action sequence).
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
