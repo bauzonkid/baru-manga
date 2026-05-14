@@ -198,6 +198,23 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
   // Model-order modal state (Section 4 ⚙ button)
   const [showModelOrder, setShowModelOrder] = useState(false)
 
+  // Rules doc modal — renders RULES.md inline
+  const [showRules, setShowRules] = useState(false)
+  const [rulesText, setRulesText] = useState<string | null>(null)
+  const [rulesError, setRulesError] = useState<string | null>(null)
+  const openRules = async () => {
+    setShowRules(true)
+    if (rulesText) return // already loaded
+    if (!(window.api?.plugins as any)?.readRulesDoc) return
+    try {
+      const r = await (window.api!.plugins as any).readRulesDoc()
+      if (r.ok) setRulesText(r.data.text)
+      else setRulesError(r.error)
+    } catch (e: any) {
+      setRulesError(e?.message || String(e))
+    }
+  }
+
   // ── Section 4: Voice meta ────────────────────────────────────────────
   interface VoiceMeta {
     voices: { key: string; label: string; demoUrl: string }[]
@@ -1016,10 +1033,10 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => (window.api?.plugins as any)?.openRulesDoc?.()}
+            onClick={openRules}
             className="text-xs text-zinc-400 hover:text-zinc-100 px-3 py-1.5 rounded transition-colors"
             style={{ borderColor: '#27272a', borderWidth: '1px' }}
-            title="Mở RULES.md — quy trình + nguyên tắc AI + chỗ chỉnh sửa"
+            title="Xem quy trình + nguyên tắc AI + chỗ chỉnh sửa"
           >
             📋 Rules
           </button>
@@ -1049,6 +1066,41 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           </button>
         </div>
       </header>
+
+      {/* ── Rules doc modal — in-app markdown viewer ─────────────────── */}
+      {showRules && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-6"
+          style={{ backgroundColor: 'rgba(0,0,0,0.75)' }}
+          onClick={() => setShowRules(false)}
+        >
+          <div
+            className="rounded-xl max-w-3xl w-full flex flex-col"
+            style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px', maxHeight: '88vh' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div
+              className="flex items-center justify-between px-5 py-3 shrink-0"
+              style={{ borderBottomColor: '#27272a', borderBottomWidth: '1px' }}
+            >
+              <h2 className="text-sm font-semibold text-zinc-100">📋 Quy trình + Nguyên tắc Tool</h2>
+              <button
+                onClick={() => setShowRules(false)}
+                className="text-zinc-500 hover:text-zinc-100 text-lg"
+              >×</button>
+            </div>
+            <div className="overflow-y-auto px-6 py-4 flex-1">
+              {rulesError ? (
+                <div className="text-xs text-rose-300 p-4">{rulesError}</div>
+              ) : !rulesText ? (
+                <div className="text-xs text-zinc-500 p-4">Đang tải...</div>
+              ) : (
+                <MarkdownText text={rulesText} />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Voiceover advanced settings modal ────────────────────────── */}
       {showModelOrder && ws && (() => {
@@ -2716,6 +2768,106 @@ function PageImage({ url, referer, alt, className, style }: PageImageProps) {
     )
   }
   return <img src={src} alt={alt} className={className} style={style} loading="lazy" />
+}
+
+// ─── Inline markdown renderer (basic, no extra deps) ─────────────────────
+// Supports: headers # ## ###, ---/HR, fenced code ```, tables (basic),
+// blockquotes >, bullets -, paragraphs. Inline: **bold**, `code`, [link](url).
+
+function renderInline(text: string): React.ReactNode {
+  const parts: React.ReactNode[] = []
+  let lastIndex = 0
+  const regex = /(\*\*([^*]+)\*\*)|(`([^`]+)`)|(\[([^\]]+)\]\(([^)]+)\))/g
+  let match
+  let k = 0
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index))
+    if (match[1]) parts.push(<strong key={k++} className="font-semibold text-zinc-100">{match[2]}</strong>)
+    else if (match[3]) parts.push(<code key={k++} className="px-1 py-0.5 rounded text-rose-300 text-[11px] font-mono" style={{ backgroundColor: '#0a0a0b' }}>{match[4]}</code>)
+    else if (match[5]) parts.push(<a key={k++} href={match[7]} className="text-rose-400 hover:underline" target="_blank" rel="noopener">{match[6]}</a>)
+    lastIndex = match.index + match[0].length
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex))
+  return parts.length > 0 ? parts : text
+}
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.split('\n')
+  const elements: React.ReactNode[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    // Fenced code block
+    if (line.startsWith('```')) {
+      const codeLines: string[] = []
+      i++
+      while (i < lines.length && !lines[i].startsWith('```')) {
+        codeLines.push(lines[i])
+        i++
+      }
+      i++ // closing ```
+      elements.push(
+        <pre key={elements.length} className="rounded-md p-3 my-3 text-[11px] font-mono overflow-x-auto leading-relaxed" style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#d4d4d8' }}>
+          {codeLines.join('\n')}
+        </pre>
+      )
+      continue
+    }
+    // Headers
+    if (/^### /.test(line)) { elements.push(<h3 key={elements.length} className="text-sm font-semibold text-zinc-100 mt-5 mb-2">{renderInline(line.slice(4))}</h3>); i++; continue }
+    if (/^## /.test(line)) { elements.push(<h2 key={elements.length} className="text-base font-semibold text-zinc-50 mt-6 mb-2">{renderInline(line.slice(3))}</h2>); i++; continue }
+    if (/^# /.test(line)) { elements.push(<h1 key={elements.length} className="text-lg font-bold text-zinc-50 mt-6 mb-3">{renderInline(line.slice(2))}</h1>); i++; continue }
+    // HR
+    if (/^---+$/.test(line)) { elements.push(<hr key={elements.length} className="my-5" style={{ borderColor: '#27272a' }} />); i++; continue }
+    // Table — header row | separator row | body rows
+    if (line.startsWith('|') && i + 1 < lines.length && /^\|[\s\-:|]+\|$/.test(lines[i + 1])) {
+      const headers = line.split('|').slice(1, -1).map(s => s.trim())
+      i += 2 // skip separator
+      const rows: string[][] = []
+      while (i < lines.length && lines[i].startsWith('|')) {
+        rows.push(lines[i].split('|').slice(1, -1).map(s => s.trim()))
+        i++
+      }
+      elements.push(
+        <table key={elements.length} className="w-full text-[12px] my-3 border-collapse">
+          <thead>
+            <tr>{headers.map((h, ci) => <th key={ci} className="text-left px-2 py-1.5 text-zinc-300 font-medium" style={{ borderBottomColor: '#3f3f46', borderBottomWidth: '1px' }}>{renderInline(h)}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => (
+              <tr key={ri}>{row.map((c, ci) => <td key={ci} className="px-2 py-1.5 text-zinc-400 align-top" style={{ borderBottomColor: '#27272a', borderBottomWidth: '1px' }}>{renderInline(c)}</td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      )
+      continue
+    }
+    // Bulleted list
+    if (/^- /.test(line) || /^  · /.test(line) || /^  · /.test(line)) {
+      const items: React.ReactNode[] = []
+      while (i < lines.length && (/^- /.test(lines[i]) || /^\s+· /.test(lines[i]) || /^\s{2,}/.test(lines[i]))) {
+        const ln = lines[i]
+        const isSub = /^\s+· /.test(ln) || /^\s{2,}/.test(ln)
+        const content = ln.replace(/^- /, '').replace(/^\s+· /, '').replace(/^\s+/, '')
+        items.push(<li key={i} className={isSub ? 'ml-6 text-zinc-400' : 'text-zinc-300'} style={{ listStyleType: isSub ? 'circle' : 'disc' }}>{renderInline(content)}</li>)
+        i++
+      }
+      elements.push(<ul key={elements.length} className="pl-5 my-2 text-sm space-y-1">{items}</ul>)
+      continue
+    }
+    // Blockquote
+    if (/^> /.test(line)) {
+      elements.push(<blockquote key={elements.length} className="pl-3 my-3 text-zinc-400 italic text-sm" style={{ borderLeftColor: '#f43f5e', borderLeftWidth: '2px' }}>{renderInline(line.slice(2))}</blockquote>)
+      i++
+      continue
+    }
+    // Paragraph
+    if (line.trim()) {
+      elements.push(<p key={elements.length} className="text-zinc-300 text-sm my-2 leading-relaxed">{renderInline(line)}</p>)
+    }
+    i++
+  }
+  return <>{elements}</>
 }
 
 // ─── Step Next/Back bar ──────────────────────────────────────────────────

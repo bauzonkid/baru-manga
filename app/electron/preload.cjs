@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('plugins:getPages', { pluginId, chapterId }),
     openByUrl: url => ipcRenderer.invoke('plugins:openByUrl', { url }),
     openUserFolder: () => ipcRenderer.invoke('plugins:openUserFolder'),
-    openRulesDoc: () => ipcRenderer.invoke('app:openRulesDoc')
+    readRulesDoc: () => ipcRenderer.invoke('app:readRulesDoc')
   },
   image: {
     fetch: (url, referer) => ipcRenderer.invoke('image:fetch', { url, referer })

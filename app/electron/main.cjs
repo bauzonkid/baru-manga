@@ -542,15 +542,13 @@ ipcMain.handle('plugins:openByUrl', async (_e, { url }) => {
   return { ok: false, error: 'Không nhận diện được URL (chỉ hỗ trợ mangadex.org/title/... hoặc /chapter/...)' }
 })
 
-// Open RULES.md (full tool workflow + AI rules doc) in the default
-// markdown/text editor.
-ipcMain.handle('app:openRulesDoc', async () => {
+// Return the raw RULES.md content for in-app modal rendering.
+ipcMain.handle('app:readRulesDoc', async () => {
   try {
     const docPath = path.join(__dirname, 'RULES.md')
     if (!fs.existsSync(docPath)) return { ok: false, error: 'RULES.md not found' }
-    const err = await shell.openPath(docPath)
-    if (err) return { ok: false, error: err }
-    return { ok: true, data: { path: docPath } }
+    const text = fs.readFileSync(docPath, 'utf-8')
+    return { ok: true, data: { text } }
   } catch (e) {
     return { ok: false, error: e.message }
   }
