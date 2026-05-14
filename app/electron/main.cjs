@@ -717,7 +717,15 @@ async function callRouter(model, body) {
 //   critic            — opinionated reviewer, drops a /10 score mid-script.
 //   funny             — playful, witty, light jabs at tropes.
 //   serious           — straight news report tone, minimal embellishment.
-function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style) {
+function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style, opts = {}) {
+  const segMin = Number.isFinite(opts.segmentsMin) ? opts.segmentsMin : 5
+  const segMax = Number.isFinite(opts.segmentsMax) ? opts.segmentsMax : 15
+  const stripCountMode = opts.stripCountMode === 'fixed' ? 'fixed' : 'auto'
+  const stripCountFixed = Number.isFinite(opts.stripCountFixed) ? opts.stripCountFixed : 3
+  const segCountClause = `${segMin} to ${segMax}`
+  const stripCountClause = stripCountMode === 'fixed'
+    ? `EXACTLY ${stripCountFixed} contiguous strips per segment. Don't return more or fewer.`
+    : `a CONTIGUOUS RUN of 1–5 strip indices, count chosen by AI based on content needs (1 for close-up beat, 2–3 for typical scene, 4–5 for extended action).`
   const langName = { vi: 'Vietnamese', th: 'Thai', en: 'English', ko: 'Korean', ja: 'Japanese' }[language] || 'English'
   const ctx = []
   if (mangaTitle) ctx.push(`Manga: ${mangaTitle}`)
@@ -763,15 +771,12 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 }
 
 Rules:
-- 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
-- keyPanels: a CONTIGUOUS RUN of 1–5 strip indices forming the visuals for this segment. Let the content decide how many:
-  · 1 strip — single close-up beat, one reaction shot, one establishing frame
-  · 2–3 strips — typical scene cluster (setup + payoff, dialogue + reaction)
-  · 4–5 strips — extended action sequence or multi-beat moment that needs more frames to land
+- ${segCountClause} segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
+- keyPanels: ${stripCountClause}
   · MUST be contiguous (strictly increasing by 1): [4,5,6] not [4,7]. No gaps.
   · Placement follows content: pick the run WHERE the visuals match the text. Can be at start, middle, or end of [panelStart..panelEnd]. Don't default to the first strips.
 
-  GOOD examples (count varies by what content needs):
+  GOOD examples (when count is AI-decided):
     Single key beat → "keyPanels": [4]
     Setup + payoff → "keyPanels": [7, 8]
     Dialogue scene → "keyPanels": [9, 10, 11]
@@ -787,7 +792,7 @@ Rules:
 Return ONLY the JSON object.`
 }
 
-ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, language, mangaTitle, chapterTitle, style }) => {
+ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, language, mangaTitle, chapterTitle, style, segmentsMin, segmentsMax, stripCountMode, stripCountFixed, aiTemperature }) => {
   console.log('[ai:voiceoverScript] called', {
     imageCount: Array.isArray(images) ? images.length : 0,
     language, style, mangaTitle, chapterTitle,
@@ -803,14 +808,16 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, models, images, languag
   // Hard cap at 100 to keep request size reasonable.
   const usePages = images.length > 100 ? sampleEvenly(images, 100) : images
   const declaredPanels = usePages.length
-  const content = [{ type: 'text', text: voiceoverPrompt(language, mangaTitle, chapterTitle, declaredPanels, style) }]
+  const content = [{ type: 'text', text: voiceoverPrompt(language, mangaTitle, chapterTitle, declaredPanels, style, {
+    segmentsMin, segmentsMax, stripCountMode, stripCountFixed
+  }) }]
   for (const img of usePages) {
     const mt = /^image\/(jpe?g|png|webp|gif|bmp|avif)$/i.test(img.mimeType || '') ? img.mimeType : 'image/jpeg'
     content.push({ type: 'image_url', image_url: { url: `data:${mt};base64,${img.base64}` } })
   }
   const body = {
     messages: [{ role: 'user', content }],
-    temperature: 0.7,
+    temperature: Number.isFinite(aiTemperature) ? aiTemperature : 0.7,
     max_tokens: 4096,
     response_format: { type: 'json_object' },
     stream: false

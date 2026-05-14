@@ -60,6 +60,13 @@ interface WorkspaceData {
     aiProvider?: 'gemini' | 'openai'
     geminiModelOrder?: string[]
     openaiModelOrder?: string[]
+    // Voiceover advanced
+    segmentsMin?: number      // default 5
+    segmentsMax?: number      // default 15
+    stripCountMode?: 'auto' | 'fixed'  // default 'auto'
+    stripCountFixed?: number  // when mode='fixed', force this many strips/segment
+    aiTemperature?: number    // default 0.7
+    // Subtitle
     subtitleEnabled?: boolean
     subtitlePreset?: string
     subtitleFontSize?: number
@@ -750,7 +757,12 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         chapterTitle: `Chapter ${ch.number}${ch.title ? ' — ' + ch.title : ''}`,
         style: (ws.defaults.style as 'recap' | 'critic' | 'funny' | 'serious') || 'recap',
         model: orderForProvider[0],
-        models: orderForProvider
+        models: orderForProvider,
+        segmentsMin: wsAny.segmentsMin,
+        segmentsMax: wsAny.segmentsMax,
+        stripCountMode: wsAny.stripCountMode,
+        stripCountFixed: wsAny.stripCountFixed,
+        aiTemperature: wsAny.aiTemperature
       } as any)
       console.log('[Voiceover] AI response', aiRes)
       if (!aiRes.ok) throw new Error(aiRes.error || 'AI không trả response')
@@ -1007,14 +1019,14 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         </div>
       </header>
 
-      {/* ── Model-order modal ────────────────────────────────────────── */}
+      {/* ── Voiceover advanced settings modal ────────────────────────── */}
       {showModelOrder && ws && (() => {
         const wsAny = ws.defaults as any
         const provider = (wsAny.aiProvider || 'gemini') as 'gemini' | 'openai'
         const stored = provider === 'openai' ? wsAny.openaiModelOrder : wsAny.geminiModelOrder
         const defaults = provider === 'openai' ? DEFAULT_OPENAI_MODELS : DEFAULT_GEMINI_MODELS
         const list: string[] = Array.isArray(stored) && stored.length > 0 ? [...stored] : [...defaults]
-        const save = (newList: string[]) => {
+        const saveOrder = (newList: string[]) => {
           updateDefault(provider === 'openai' ? { openaiModelOrder: newList } as any : { geminiModelOrder: newList } as any)
         }
         const move = (idx: number, dir: -1 | 1) => {
@@ -1022,9 +1034,13 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
           if (target < 0 || target >= list.length) return
           const next = list.slice()
           ;[next[idx], next[target]] = [next[target], next[idx]]
-          save(next)
+          saveOrder(next)
         }
-        const resetDefaults = () => save(defaults)
+        const segMin = wsAny.segmentsMin ?? 5
+        const segMax = wsAny.segmentsMax ?? 15
+        const stripMode = (wsAny.stripCountMode || 'auto') as 'auto' | 'fixed'
+        const stripFixed = wsAny.stripCountFixed ?? 3
+        const temperature = wsAny.aiTemperature ?? 0.7
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-6"
@@ -1032,56 +1048,145 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
             onClick={() => setShowModelOrder(false)}
           >
             <div
-              className="rounded-xl p-5 max-w-md w-full"
+              className="rounded-xl p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto"
               style={{ backgroundColor: '#18181b', borderColor: '#27272a', borderWidth: '1px' }}
               onClick={e => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-zinc-100">Thứ tự fallback ({provider})</h2>
+              <div className="flex items-center justify-between mb-4 sticky top-0 -mx-5 -mt-5 px-5 pt-5 pb-3" style={{ backgroundColor: '#18181b' }}>
+                <h2 className="text-sm font-semibold text-zinc-100">Cài đặt Voiceover</h2>
                 <button
                   onClick={() => setShowModelOrder(false)}
                   className="text-zinc-500 hover:text-zinc-100 text-lg"
                 >×</button>
               </div>
-              <p className="text-[11px] text-zinc-500 mb-3">
-                Model đầu tiên được gọi trước. Nếu rate-limit/error sẽ rớt xuống model kế.
-              </p>
-              <div className="space-y-1.5">
-                {list.map((m, i) => (
-                  <div
-                    key={m}
-                    className="flex items-center gap-2 px-2.5 py-2 rounded-md"
-                    style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
-                  >
-                    <span className="text-[11px] text-zinc-500 shrink-0 w-5 text-center">{i + 1}</span>
-                    <span className="text-sm text-zinc-200 flex-1 truncate">{MODEL_DISPLAY_NAMES[m] || m}</span>
-                    <button
-                      onClick={() => move(i, -1)}
-                      disabled={i === 0}
-                      className="w-7 h-7 rounded text-zinc-400 hover:text-white disabled:opacity-30"
-                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
-                      title="Lên"
-                    >↑</button>
-                    <button
-                      onClick={() => move(i, 1)}
-                      disabled={i === list.length - 1}
-                      className="w-7 h-7 rounded text-zinc-400 hover:text-white disabled:opacity-30"
-                      style={{ borderColor: '#27272a', borderWidth: '1px' }}
-                      title="Xuống"
-                    >↓</button>
-                  </div>
-                ))}
+
+              {/* Section: Số segments */}
+              <div className="mb-5">
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Số segments / chapter</div>
+                <p className="text-[11px] text-zinc-600 mb-2">
+                  AI gen bao nhiêu segment cho 1 chapter. Chapter dài (200 panel) cần range cao.
+                </p>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm text-zinc-300">
+                    Min
+                    <input
+                      type="number" min={1} max={50}
+                      value={segMin}
+                      onChange={e => updateDefault({ segmentsMin: Math.max(1, Math.min(50, Number(e.target.value) || 5)) } as any)}
+                      className="w-16 px-2 py-1 text-sm rounded text-center outline-none"
+                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-zinc-300">
+                    Max
+                    <input
+                      type="number" min={1} max={50}
+                      value={segMax}
+                      onChange={e => updateDefault({ segmentsMax: Math.max(1, Math.min(50, Number(e.target.value) || 15)) } as any)}
+                      className="w-16 px-2 py-1 text-sm rounded text-center outline-none"
+                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                    />
+                  </label>
+                  <span className="text-[10px] text-zinc-600">Default: 5–15</span>
+                </div>
               </div>
-              <div className="flex items-center justify-between mt-4">
+
+              {/* Section: Strip count per segment */}
+              <div className="mb-5">
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Strip count / segment</div>
+                <p className="text-[11px] text-zinc-600 mb-2">
+                  Bao nhiêu ảnh ghép cho 1 segment. AI auto = AI quyết 1-5 tùy content. Cố định = ép số chính xác.
+                </p>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                    <input
+                      type="radio" name="stripMode"
+                      checked={stripMode === 'auto'}
+                      onChange={() => updateDefault({ stripCountMode: 'auto' } as any)}
+                      className="accent-rose-500"
+                    />
+                    AI auto (1–5)
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                    <input
+                      type="radio" name="stripMode"
+                      checked={stripMode === 'fixed'}
+                      onChange={() => updateDefault({ stripCountMode: 'fixed' } as any)}
+                      className="accent-rose-500"
+                    />
+                    Cố định
+                  </label>
+                  <input
+                    type="number" min={1} max={10}
+                    value={stripFixed}
+                    disabled={stripMode !== 'fixed'}
+                    onChange={e => updateDefault({ stripCountFixed: Math.max(1, Math.min(10, Number(e.target.value) || 3)) } as any)}
+                    className="w-16 px-2 py-1 text-sm rounded text-center outline-none disabled:opacity-40"
+                    style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
+                  />
+                  <span className="text-[10px] text-zinc-600">strips</span>
+                </div>
+              </div>
+
+              {/* Section: AI Temperature */}
+              <div className="mb-5">
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">AI Temperature</div>
+                <p className="text-[11px] text-zinc-600 mb-2">
+                  0 = deterministic, 1 = creative. Default 0.7 cho recap có tone.
+                </p>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range" min={0} max={1} step={0.05}
+                    value={temperature}
+                    onChange={e => updateDefault({ aiTemperature: Number(e.target.value) } as any)}
+                    className="flex-1 accent-rose-500"
+                  />
+                  <span className="text-sm text-zinc-200 w-12 text-center font-mono">{temperature.toFixed(2)}</span>
+                </div>
+              </div>
+
+              {/* Section: Model fallback order */}
+              <div className="mb-5">
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Thứ tự model ({provider})</div>
+                <p className="text-[11px] text-zinc-600 mb-2">
+                  Model #1 gọi trước. Rate-limit/error → rớt xuống model kế.
+                </p>
+                <div className="space-y-1.5">
+                  {list.map((m, i) => (
+                    <div
+                      key={m}
+                      className="flex items-center gap-2 px-2.5 py-2 rounded-md"
+                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px' }}
+                    >
+                      <span className="text-[11px] text-zinc-500 shrink-0 w-5 text-center">{i + 1}</span>
+                      <span className="text-sm text-zinc-200 flex-1 truncate">{MODEL_DISPLAY_NAMES[m] || m}</span>
+                      <button
+                        onClick={() => move(i, -1)}
+                        disabled={i === 0}
+                        className="w-7 h-7 rounded text-zinc-400 hover:text-white disabled:opacity-30"
+                        style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                      >↑</button>
+                      <button
+                        onClick={() => move(i, 1)}
+                        disabled={i === list.length - 1}
+                        className="w-7 h-7 rounded text-zinc-400 hover:text-white disabled:opacity-30"
+                        style={{ borderColor: '#27272a', borderWidth: '1px' }}
+                      >↓</button>
+                    </div>
+                  ))}
+                </div>
                 <button
-                  onClick={resetDefaults}
-                  className="text-[11px] text-zinc-400 hover:text-zinc-100"
+                  onClick={() => saveOrder(defaults)}
+                  className="text-[11px] text-zinc-400 hover:text-zinc-100 mt-2"
                 >
-                  Reset về mặc định
+                  Reset model order về mặc định
                 </button>
+              </div>
+
+              <div className="flex items-center justify-end sticky bottom-0 -mx-5 -mb-5 px-5 py-3" style={{ backgroundColor: '#18181b', borderTopColor: '#27272a', borderTopWidth: '1px' }}>
                 <button
                   onClick={() => setShowModelOrder(false)}
-                  className="px-3 py-1.5 rounded-md text-xs font-medium text-white"
+                  className="px-4 py-2 rounded-md text-xs font-medium text-white"
                   style={{ backgroundColor: '#f43f5e' }}
                 >
                   Xong
@@ -1705,9 +1810,9 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                       onClick={() => setShowModelOrder(true)}
                       className="text-xs px-2.5 py-1.5 rounded-md text-zinc-300 hover:text-white shrink-0"
                       style={{ borderColor: '#27272a', borderWidth: '1px' }}
-                      title="Tuỳ chỉnh thứ tự fallback model"
+                      title="Tuỳ chỉnh segments, strip count, temperature, model order..."
                     >
-                      ⚙ Thứ tự
+                      ⚙ Cài đặt
                     </button>
                   </label>
                 </div>

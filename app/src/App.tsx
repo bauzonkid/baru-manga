@@ -84,6 +84,11 @@ interface Api {
       mangaTitle?: string
       chapterTitle?: string
       style?: 'recap' | 'critic' | 'funny' | 'serious'
+      segmentsMin?: number
+      segmentsMax?: number
+      stripCountMode?: 'auto' | 'fixed'
+      stripCountFixed?: number
+      aiTemperature?: number
     }) => Promise<IpcResult<{
       segments: VoiceoverSegment[]
       model: string
