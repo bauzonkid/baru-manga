@@ -763,21 +763,20 @@ Output a JSON object exactly matching this schema (no markdown, no commentary):
 
 Rules:
 - 5 to 15 segments total. Each segment's [panelStart..panelEnd] is a CONTIGUOUS range, no gaps, no overlaps, covering all ${totalPanels} pages from 0 to ${totalPanels - 1}.
-- keyPanels: a CONTIGUOUS RUN of strip indices that forms ONE visual scene cluster for this segment.
-  · MUST be contiguous: [4,5,6] not [0,1,6,10]. No gaps. Strictly increasing by 1.
-  · CRITICAL — placement follows content: pick the cluster WHERE the visuals best match this segment's text. The cluster can be at the START, MIDDLE, or END of [panelStart..panelEnd] — let the narration content drive placement. DO NOT default to picking the first 3 strips of the range every time.
-  · Manga usually splits ONE moment across 2–4 consecutive strips (close-up + reaction + action + dialogue). Group them.
-  · Length: usually 2–4 strips. Occasionally 1 (single beat) or 5 (extended action). Never > 5.
+- keyPanels: the FEW strips (usually 1, sometimes 2) that visually nail this segment. Pick the most DETAILED, on-point strip for the narration — don't pad with extras.
+  · Default to 1 strip. Use 2 only when one strip alone doesn't capture the moment (e.g. action + reaction shot side-by-side).
+  · 3 strips max — only for extended sequences where one frame can't tell the story.
+  · If using 2 or 3, they MUST be contiguous: [4,5] not [4,7]. Strictly increasing by 1.
+  · Placement follows content: pick the strip(s) WHERE the visuals match the text. Could be at the start, middle, or end of [panelStart..panelEnd]. DO NOT default to the first strip of each range.
 
-  GOOD examples (notice cluster placement varies based on content):
-    Text describes OPENING of scene → "keyPanels": [0, 1, 2]       ← cluster at start
-    Text describes MID-scene dialogue → "keyPanels": [4, 5, 6]     ← cluster in middle
-    Text describes CLIMAX/closing → "keyPanels": [8, 9, 10]        ← cluster at end
-    Single key beat → "keyPanels": [12]
+  GOOD examples (smaller = better):
+    Single key beat → "keyPanels": [4]              ← 1 strip, the detail shot
+    Action + reaction → "keyPanels": [7, 8]         ← 2 contiguous
+    Extended sequence (rare) → "keyPanels": [9, 10, 11]
   BAD examples:
-    "keyPanels": [0, 1, 6, 10]   ← scattered with gaps
-    Always picking the FIRST 3 strips of every range regardless of where the matching content actually is in the page sequence
-    "keyPanels": [3, 5, 7]       ← every-other-panel, not contiguous
+    Padding with extras → "keyPanels": [0, 1, 2, 3, 4]
+    Scattered → "keyPanels": [0, 1, 6, 10]
+    Always picking the FIRST strips regardless of where the matching content is
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - ${persona}
 - panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
@@ -878,15 +877,14 @@ ipcMain.handle('ai:voiceoverScript', async (_e, { model, images, language, manga
             keyPanels = keyPanels.slice(bestStart, bestStart + bestLen)
           }
 
-          if (keyPanels.length > 5) keyPanels = keyPanels.slice(0, 5)
+          if (keyPanels.length > 3) keyPanels = keyPanels.slice(0, 3)
 
-          // If AI gave nothing usable, fall back to a small contiguous
-          // sample centered in the segment range.
+          // If AI gave nothing usable, fall back to a single strip near
+          // the middle of the segment range.
           if (keyPanels.length === 0) {
             const span = end - start + 1
-            const desired = Math.min(span, 3)
-            const midStart = start + Math.max(0, Math.floor((span - desired) / 2))
-            for (let i = 0; i < desired; i++) keyPanels.push(midStart + i)
+            const mid = start + Math.floor(span / 2)
+            keyPanels.push(mid)
           }
 
           clean.push({ text: t, panelStart: start, panelEnd: end, keyPanels })
