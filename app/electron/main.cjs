@@ -628,8 +628,9 @@ const ROUTER_BASE = process.env.NINEROUTER_BASE || 'https://yohomin.com/v1'
 // Gemini and fall back to bigger / older variants if the chosen model is rate
 // limited (HTTP 429). Order picked from /v1/models on 2026-05-12.
 const VISION_FALLBACK = [
-  'gemini/gemini-3.1-flash-lite-preview',
-  'gemini/gemini-3-flash-preview',
+  'gemini/gemini-3-flash-preview',          // primary — sếp default
+  'gemini/gemini-2.5-flash',                // secondary — sếp default
+  'gemini/gemini-3.1-flash-lite-preview',   // tertiary — only if first two rate-limit
   'gemini/gemini-2.0-flash-lite',
   'gemini/gemini-3.1-pro-preview',
   'openai/gpt-4o-mini',

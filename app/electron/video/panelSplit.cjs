@@ -19,11 +19,13 @@ const path = require('node:path')
 const { resolveFfmpeg, resolveFfprobe } = require('./cinematic.cjs')
 const { callRouter } = require('../ai/router.cjs')
 
-// Vision-capable models — try in order, fall back on 429/error
+// Vision-capable models for panel bbox detection. Same order as
+// VISION_FALLBACK in main.cjs (voiceover gen) for consistency:
+// gemini-3-flash → gemini-2.5-flash → gemini-3.1-flash-lite.
 const VISION_MODELS_PANEL_DETECT = [
+  'gemini/gemini-3-flash-preview',
   'gemini/gemini-2.5-flash',
-  'gemini/gemini-2.0-flash',
-  'gemini/gemini-2.5-flash-lite'
+  'gemini/gemini-3.1-flash-lite-preview'
 ]
 
 const PANEL_DETECT_PROMPT = `You are looking at a single page from a manga chapter. The page is a tall vertical image that may contain ONE OR MORE comic panels stacked top-to-bottom, separated by whitespace gaps.
