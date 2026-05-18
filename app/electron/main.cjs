@@ -1395,8 +1395,17 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
     mangaSlug,
     workspaceId,
     subtitleStyle,
-    subtitleEnabled
+    subtitleEnabled,
+    silent = false  // when true: skip TTS entirely, render silent MP4 (CapCut TTS sau)
   } = opts || {}
+
+  // Estimate spoken duration for silent mode — Vietnamese narration ~12 chars/s
+  // for cinematic recap voice. Clamp [2.5s, 12s] per segment.
+  function estimateSegmentDuration(text) {
+    const len = String(text || '').trim().length
+    if (len === 0) return 2.5
+    return Math.max(2.5, Math.min(12, len / 12))
+  }
 
   if (!Array.isArray(chapters) || chapters.length === 0) {
     return { ok: false, error: 'Không có chapters' }
@@ -1472,29 +1481,50 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
         }
       }
 
-      // Phase 2: TTS batch
-      progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ch.segments.length, msg: 'Synthesize voice...' })
+      // Phase 2: TTS batch (skipped when silent — CapCut TTS sau)
       const ttsResults = []
-      for (let i = 0; i < ch.segments.length; i++) {
-        const seg = ch.segments[i]
-        const text = String(seg.text || '').trim()
-        if (!text) continue
-        const result = await ttsCache.getOrFetch(
-          { text, voice: v, model: m, language: lang, baseDir: cacheBaseDir },
-          () => fetchTtsWav({ text, voice: v, model: m, language: lang })
-        )
-        if (result.cached) totalCacheHits++; else totalTtsCalls++
-        ttsResults.push({
-          segmentIdx: i,
-          text,
-          panelStart: seg.panelStart,
-          panelEnd: seg.panelEnd,
-          keyPanels: Array.isArray(seg.keyPanels) ? seg.keyPanels : null,
-          audioPath: result.path,
-          hash: result.hash,
-          cached: result.cached
-        })
-        progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ch.segments.length, cached: result.cached, hash: result.hash })
+      if (silent) {
+        // Build TTS-shaped results without calling TTS — duration derived from
+        // text length so downstream render code path stays identical.
+        for (let i = 0; i < ch.segments.length; i++) {
+          const seg = ch.segments[i]
+          const text = String(seg.text || '').trim()
+          if (!text) continue
+          ttsResults.push({
+            segmentIdx: i,
+            text,
+            panelStart: seg.panelStart,
+            panelEnd: seg.panelEnd,
+            keyPanels: Array.isArray(seg.keyPanels) ? seg.keyPanels : null,
+            audioPath: null,
+            hash: null,
+            cached: false,
+            durationSec: estimateSegmentDuration(text)
+          })
+        }
+      } else {
+        progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: 0, total: ch.segments.length, msg: 'Synthesize voice...' })
+        for (let i = 0; i < ch.segments.length; i++) {
+          const seg = ch.segments[i]
+          const text = String(seg.text || '').trim()
+          if (!text) continue
+          const result = await ttsCache.getOrFetch(
+            { text, voice: v, model: m, language: lang, baseDir: cacheBaseDir },
+            () => fetchTtsWav({ text, voice: v, model: m, language: lang })
+          )
+          if (result.cached) totalCacheHits++; else totalTtsCalls++
+          ttsResults.push({
+            segmentIdx: i,
+            text,
+            panelStart: seg.panelStart,
+            panelEnd: seg.panelEnd,
+            keyPanels: Array.isArray(seg.keyPanels) ? seg.keyPanels : null,
+            audioPath: result.path,
+            hash: result.hash,
+            cached: result.cached
+          })
+          progress({ phase: 'tts', chapterIdx: chIdxOut, chapterTotal: chTotal, i: i + 1, total: ch.segments.length, cached: result.cached, hash: result.hash })
+        }
       }
 
       // Phase 3: render clips. New approach — vstack the strips AI picked
@@ -1519,12 +1549,14 @@ ipcMain.handle('video:renderBatch', async (evt, opts) => {
         const clipOut = path.join(clipsDir, `seg_${String(r.segmentIdx).padStart(3, '0')}.mp4`)
         await cinematic.renderSegmentScroll({
           stripPaths: strips,
-          audioPath: r.audioPath,
-          outPath: clipOut
+          audioPath: r.audioPath,        // null when silent
+          outPath: clipOut,
+          silent,
+          durationSec: silent ? r.durationSec : null
         })
         allClips.push(clipOut)
         // Track segment timing for later subtitle overlay step
-        const dur = await cinematic.probeDuration(r.audioPath)
+        const dur = silent ? r.durationSec : await cinematic.probeDuration(r.audioPath)
         segmentTimings.push({
           chapterIdx: chIdxOut,
           chapterSlug: cSlug,

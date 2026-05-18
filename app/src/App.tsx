@@ -125,6 +125,7 @@ interface Api {
       mangaSlug: string
       workspaceId?: string
       subtitleEnabled?: boolean
+      silent?: boolean  // skip TTS, video không tiếng (CapCut TTS sau)
       subtitleStyle?: {
         fontSize?: number
         position?: 'top' | 'middle' | 'bottom'

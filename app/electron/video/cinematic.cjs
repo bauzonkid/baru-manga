@@ -561,7 +561,9 @@ async function renderSegmentScroll(opts) {
     audioPath,
     outPath,
     dims = { width: 1920, height: 1080 },
-    fps = 30
+    fps = 30,
+    silent = false,        // when true: no audio input, use durationSec instead
+    durationSec = null     // required when silent=true
   } = opts
 
   if (!Array.isArray(stripPaths) || stripPaths.length === 0) {
@@ -570,9 +572,17 @@ async function renderSegmentScroll(opts) {
   for (const p of stripPaths) {
     if (!fs.existsSync(p)) throw new Error(`Strip not found: ${p}`)
   }
-  if (!fs.existsSync(audioPath)) throw new Error(`Audio not found: ${audioPath}`)
 
-  const totalDur = await probeDuration(audioPath)
+  let totalDur
+  if (silent) {
+    if (!Number.isFinite(durationSec) || durationSec <= 0) {
+      throw new Error('renderSegmentScroll: silent=true requires durationSec > 0')
+    }
+    totalDur = durationSec
+  } else {
+    if (!fs.existsSync(audioPath)) throw new Error(`Audio not found: ${audioPath}`)
+    totalDur = await probeDuration(audioPath)
+  }
   const { width: W, height: H } = dims
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
@@ -599,20 +609,31 @@ async function renderSegmentScroll(opts) {
     `[bgb][fgs]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]`
   ].join(';')
 
+  // Build ffmpeg args — silent skips audio input entirely (no -i audio, no -c:a)
   const args = [
     '-y',
-    '-loop', '1', '-framerate', String(fps), '-t', String(totalDur), '-i', sourceImage,
-    '-i', audioPath,
-    '-filter_complex', filterComplex,
-    '-map', '[v]', '-map', '1:a',
-    '-r', String(fps),
-    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '192k',
-    '-shortest',
-    outPath
+    '-loop', '1', '-framerate', String(fps), '-t', String(totalDur), '-i', sourceImage
   ]
+  if (!silent) {
+    args.push('-i', audioPath)
+  }
+  args.push(
+    '-filter_complex', filterComplex,
+    '-map', '[v]'
+  )
+  if (!silent) {
+    args.push('-map', '1:a')
+  }
+  args.push(
+    '-r', String(fps),
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p'
+  )
+  if (!silent) {
+    args.push('-c:a', 'aac', '-b:a', '192k')
+  }
+  args.push('-shortest', outPath)
 
-  console.log(`[renderSegmentScroll] ${stripPaths.length} strip${stripPaths.length > 1 ? 's (vstacked)' : ''}, audio ${totalDur.toFixed(2)}s, static cinematic, out=${path.basename(outPath)}`)
+  console.log(`[renderSegmentScroll] ${stripPaths.length} strip${stripPaths.length > 1 ? 's (vstacked)' : ''}, ${silent ? 'SILENT' : 'audio'} ${totalDur.toFixed(2)}s, static cinematic, out=${path.basename(outPath)}`)
 
   await new Promise((resolve, reject) => {
     const proc = spawn(resolveFfmpeg(), args, { windowsHide: true })

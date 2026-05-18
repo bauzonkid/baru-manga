@@ -11,7 +11,7 @@ Tài liệu sống cho tool. Liệt kê:
 
 ---
 
-## Pipeline 7 step
+## Pipeline 6 step
 
 | # | Step | Input | Output |
 |---|---|---|---|
@@ -20,9 +20,10 @@ Tài liệu sống cho tool. Liệt kê:
 | 3 | Tải ảnh | Selected chapter | `<ws>/pages/<ch>/page_NNN.jpg` |
 | 3.5 | Tách panels (optional) | Pages downloaded | `<ws>/pages/<ch>/_panels/panel_NNN.jpg` |
 | 4 | Voiceover | Pages (or panels) + AI | Segments `<ws>/voiceover/<ch>.json` |
-| 5 | Giọng đọc | Voice + lang + style | Defaults vào workspace |
-| 6 | Render gốc | Pages + segments | `<ws>/videos/<slug>__multi__<stamp>.mp4` + timings JSON |
+| 6 | Render silent | Pages + segments | `<ws>/videos/<slug>__multi__<stamp>.mp4` + timings JSON |
 | 7 | Phụ đề + Final | Base MP4 + sub config | `<ws>/videos/<slug>__withsub__<stamp>.mp4` + `.srt` sidecar |
+
+> **Step 5 (Giọng đọc) đã bỏ.** Tool gen video silent (không tiếng). Sếp import vô CapCut để gen TTS theo segment text. Lý do: tránh phụ thuộc 9router TTS + Gemini voice quota, giữ tool nhẹ, sếp kiểm soát giọng + chỉnh sửa dễ hơn trong CapCut. Số step nhảy 4 → 6 vì giữ nguyên id sub/render cũ.
 
 Auto-resume: load workspace → scan disk → jump tới step cao nhất đã làm.
 
@@ -117,15 +118,17 @@ Auto mode prompt ép AI **bias toward fewer** (1 or 2 strips) cho hầu hết se
 
 ---
 
-## Step 6 Render gốc — nguyên tắc
+## Step 6 Render silent — nguyên tắc
 
 ### Pipeline mỗi segment
 
 1. Lấy keyPanels từ segment → resolve sang local paths
-2. **Single strip:** filter `[bg blur fill] + [fg fit decrease] + overlay center` → static letterbox
-3. **Multi strip:** ffmpeg vstack → combined.png → cùng filter static letterbox
-4. Concat segment clips → final base MP4
-5. Per-segment timing (start/end sec) lưu vào `<base>.timings.json` cho Step 7
+2. **Duration estimate:** `clamp(text_chars / 12, 2.5, 12)` giây (tốc độ nói tiếng Việt cinematic narration)
+3. **Single strip:** filter `[bg blur fill] + [fg fit decrease] + overlay center` → static letterbox
+4. **Multi strip:** ffmpeg vstack → combined.png → cùng filter static letterbox
+5. **No audio:** ffmpeg không có `-i audio`, không có `-c:a` flag → silent MP4
+6. Concat segment clips → final base MP4
+7. Per-segment timing (start/end sec) lưu vào `<base>.timings.json` cho Step 7
 
 ### Style cố định
 
@@ -134,12 +137,14 @@ Auto mode prompt ép AI **bias toward fewer** (1 or 2 strips) cho hầu hết se
 - Foreground fit `force_original_aspect_ratio=decrease`
 - No zoom, no scroll, no pan (sếp pick static)
 - libx264 preset medium, CRF 20
-- AAC 192k audio
+- No audio track (sếp sẽ add TTS trong CapCut)
 
 ### Tunable
 
 - Hiện hardcode trong `electron/video/cinematic.cjs` `renderSegmentScroll()`
+- Silent flag pass từ `video:renderBatch` → cinematic
 - TODO: Section 6 ⚙ modal cho render mode picker (static/zoom-pan/scroll variants)
+- TODO: Chars-per-second slider cho duration estimate (hiện hardcode 12 ch/s)
 
 ---
 

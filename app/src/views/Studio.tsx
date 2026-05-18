@@ -953,7 +953,8 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
         language: ws.defaults.language,
         mangaSlug: slugify(ws.title),
         workspaceId: ws.id,
-        subtitleEnabled: false
+        subtitleEnabled: false,
+        silent: true  // TTS bỏ — CapCut sẽ làm voice
       })
       if (!r.ok) throw new Error(r.error)
       setRenderOutput({ outPath: r.data.outPath, bytes: r.data.bytes })
@@ -2157,79 +2158,18 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
               <StepNextBar
                 disabled={!allSelectedHaveSegments}
                 hint={allSelectedHaveSegments ? 'Đủ script cho mọi chapter' : `Còn ${selectedList.length - segments.size} chapter chưa gen`}
-                label="Tiếp: Giọng đọc"
-                onNext={() => setActiveStep(5)}
+                label="Tiếp: Render gốc"
+                onNext={() => setActiveStep(6)}
                 onBack={() => setActiveStep(3)}
               />
             </Section>
           )}
 
-          {/* SECTION 5: Voice (was 4) */}
-          {activeStep === 5 && ws && selectedList.length > 0 && (
-            <Section number={5} title="Giọng đọc">
-              {!voiceMeta ? (
-                <p className="text-sm text-zinc-500 italic">Đang tải danh sách voice...</p>
-              ) : (
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="flex flex-col gap-1">
-                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">Voice</span>
-                    <div className="flex gap-1.5">
-                      <select
-                        value={ws.defaults.voice}
-                        onChange={e => updateDefault({ voice: e.target.value })}
-                        className="flex-1 px-2.5 py-2 text-sm rounded-md outline-none"
-                        style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                      >
-                        {voiceMeta.voices.map(v => (
-                          <option key={v.key} value={v.key}>{v.label}</option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => {
-                          const v = voiceMeta.voices.find(x => x.key === ws.defaults.voice)
-                          if (v?.demoUrl) playDemo(v.demoUrl)
-                        }}
-                        className="px-2.5 py-2 rounded-md text-xs text-zinc-300 hover:text-white shrink-0"
-                        style={{ borderColor: '#27272a', borderWidth: '1px' }}
-                        title="Demo Google (deterministic)"
-                      >
-                        ▶
-                      </button>
-                    </div>
-                  </label>
+          {/* SECTION 5 (Giọng đọc) — REMOVED. CapCut sẽ làm TTS. */}
 
-                  <label className="flex flex-col gap-1">
-                    <span className="text-[11px] uppercase tracking-wider text-zinc-500">Ngôn ngữ</span>
-                    <select
-                      value={ws.defaults.language}
-                      onChange={e => updateDefault({ language: e.target.value })}
-                      className="px-2.5 py-2 text-sm rounded-md outline-none"
-                      style={{ backgroundColor: '#0a0a0b', borderColor: '#27272a', borderWidth: '1px', color: '#e4e4e7' }}
-                    >
-                      <option value="vi">Tiếng Việt (vi-VN)</option>
-                      <option value="th">ภาษาไทย (th-TH)</option>
-                      <option value="en">English (en-US)</option>
-                      <option value="ko">한국어 (ko-KR)</option>
-                      <option value="ja">日本語 (ja-JP)</option>
-                    </select>
-                  </label>
-
-                </div>
-              )}
-
-              <StepNextBar
-                disabled={false}
-                hint={`Voice: ${ws.defaults.voice} · ${ws.defaults.language.toUpperCase()}`}
-                label="Tiếp: Render gốc"
-                onNext={() => setActiveStep(6)}
-                onBack={() => setActiveStep(4)}
-              />
-            </Section>
-          )}
-
-          {/* SECTION 6: Render base (no sub) */}
+          {/* SECTION 6: Render base (silent — no TTS, CapCut sẽ thêm sau) */}
           {activeStep === 6 && ws && selectedList.length > 0 && (
-            <Section number={6} title="Render gốc (không phụ đề)">
+            <Section number={6} title="Render silent (để CapCut TTS)">
               <div className="space-y-3">
                 {/* Summary */}
                 <div className="text-xs text-zinc-400 flex items-center gap-4 flex-wrap">
@@ -2237,9 +2177,7 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   <span>·</span>
                   <span>{Array.from(segments.values()).reduce((s, arr) => s + arr.length, 0)} segment tổng</span>
                   <span>·</span>
-                  <span>Voice: <span className="text-zinc-200">{ws.defaults.voice}</span></span>
-                  <span>·</span>
-                  <span>{ws.defaults.language.toUpperCase()}</span>
+                  <span className="text-zinc-500 italic">silent · TTS làm trong CapCut</span>
                 </div>
 
                 {/* Render button */}
@@ -2249,9 +2187,9 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                   className="w-full py-3 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
                   style={{ backgroundColor: renderBusy ? '#71717a' : '#f43f5e' }}
                 >
-                  {renderBusy ? 'Đang render gốc...' : (
+                  {renderBusy ? 'Đang render...' : (
                     allSelectedHaveSegments
-                      ? `🎬 Render gốc — ${selectedList.length} chapter, không sub`
+                      ? `🎬 Render silent — ${selectedList.length} chapter`
                       : 'Gen voiceover cho tất cả chapter trước'
                   )}
                 </button>
@@ -2312,7 +2250,7 @@ export default function Studio({ onOpenLegacy }: StudioProps) {
                 )}
               </div>
               <StepNextBar
-                onBack={() => setActiveStep(5)}
+                onBack={() => setActiveStep(4)}
                 onNext={renderOutput ? () => setActiveStep(7) : undefined}
                 disabled={!renderOutput}
                 label="Tiếp: Phụ đề"
@@ -2608,7 +2546,7 @@ function splitTextForSubtitlePreview(text: string, maxChars = 60): string[] {
 
 // ─── Pipeline sidebar ────────────────────────────────────────────────────
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7
+type Step = 1 | 2 | 3 | 4 | 6 | 7  // 5 removed — TTS done in CapCut
 
 interface PipelineNavProps {
   activeStep: Step
@@ -2646,11 +2584,7 @@ function PipelineNav({ activeStep, onSelect, hasWorkspace, chaptersSelected, all
       status: !allDownloaded ? 'locked' : (allHaveSegments ? 'done' : 'ready')
     },
     {
-      n: 5, title: 'Giọng đọc', sub: 'Voice + style',
-      status: !allDownloaded ? 'locked' : 'ready'
-    },
-    {
-      n: 6, title: 'Render gốc', sub: renderDone ? 'Hoàn thành (no sub)' : (allHaveSegments ? 'Sẵn sàng' : 'Đợi voiceover'),
+      n: 6, title: 'Render silent', sub: renderDone ? 'Hoàn thành' : (allHaveSegments ? 'Sẵn sàng' : 'Đợi voiceover'),
       status: !allHaveSegments ? 'locked' : (renderDone ? 'done' : 'ready')
     },
     {
