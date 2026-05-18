@@ -38,15 +38,20 @@ Auto-resume: load workspace → scan disk → jump tới step cao nhất đã l�
   Not every panel has to be covered — skip filler.
 - keyPanels: ${stripCountClause}
   · Panel indices ANY value 0..${totalPanels - 1}
-  · CAN be scattered (e.g. [0, 5, 12])
-  · Pick by visual relevance, NOT contiguity
-  · Skip filler panels between key beats
+  · MUST scatter by VISUAL RHYTHM, NOT reading order
+  · DO NOT pick [5,6,7] unless true action sequence
+  · Typical: 1 close-up | 2 setup+payoff | 3 across chapter
   · Can repeat across segments if a panel is so important
   · Order keyPanels ascending within each segment
+- VARY keyPanels count across segments (chapter 8 segs ≠ mỗi seg 3 panels)
 - Each segment's text is 1–3 sentences. Duration ~ how long viewers
   look at that segment.
 - ${persona}  ← (recap/critic/funny/serious)
 ```
+
+### Strip count auto mode (\${stripCountClause})
+
+Auto mode prompt ép AI **bias toward fewer** (1 or 2 strips) cho hầu hết segment. Chỉ pick 3+ khi scene thật sự cần. Tránh AI default cứng 3 ảnh liền nhau mọi segment.
 
 ### Placeholders backend tự substitute
 

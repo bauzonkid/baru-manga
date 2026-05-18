@@ -735,19 +735,23 @@ async function callRouter(model, body) {
 const DEFAULT_RULES_TEMPLATE = `- \${segCountClause} segments total, ordered by STORY CHRONOLOGY (segment 1 = earliest beat in the chapter, last segment = closing). Not every panel has to be covered — skip filler.
 - keyPanels: \${stripCountClause}
   · Panel indices can be ANY value 0..\${totalPanels - 1}.
-  · They CAN be scattered (e.g. [0, 5, 12]) — pick panels by visual relevance to the narration, NOT by contiguity. Skip filler panels between key beats.
+  · MUST be scattered by VISUAL RHYTHM of the scene, NOT by reading order. Default to picking key story beats only.
+  · DO NOT pick 3 consecutive indices like [5, 6, 7] unless the scene is a true action/motion sequence that needs frame-by-frame continuity.
+  · Typical pick: 1 panel for a close-up beat, 2 panels far apart for a reaction shot pair, 3 scattered panels across the chapter range for a long-arc segment.
   · They can repeat across different segments if a panel is so important you want to revisit it.
   · Order keyPanels ascending (smallest index first within each segment).
+- VARY the keyPanels count between segments. A chapter with 8 segments should NOT have every segment picking exactly 3 panels — that's a sign you're picking by rhythm of the prompt, not the story.
 - Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
 - \${persona}
 
 GOOD examples:
-  Single key beat → "keyPanels": [4]
-  Two key shots far apart → "keyPanels": [3, 11]
-  Three beats across chapter → "keyPanels": [0, 5, 12]
-  Action sequence (close together) → "keyPanels": [13, 14, 15]
+  Single key beat (quiet moment, one impactful panel) → "keyPanels": [4]
+  Two key shots far apart (setup + payoff) → "keyPanels": [3, 11]
+  Three beats spread across chapter (intro + middle + climax) → "keyPanels": [0, 5, 12]
+  Action sequence — frame-by-frame REQUIRED → "keyPanels": [13, 14, 15]
 BAD examples:
-  Picking 5 sequential filler panels just because they're adjacent → wastes screen time
+  Picking [5, 6, 7] just because they're sequential → wastes screen time on filler
+  Every segment picking exactly 3 panels in a row → you're ignoring the story rhythm
   Skipping the actual climax because it's later in the page sequence`
 
 function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style, opts = {}) {
@@ -758,7 +762,7 @@ function voiceoverPrompt(language, mangaTitle, chapterTitle, totalPanels, style,
   const segCountClause = `${segMin} to ${segMax}`
   const stripCountClause = stripCountMode === 'fixed'
     ? `EXACTLY ${stripCountFixed} strips per segment. Don't return more or fewer.`
-    : `1–5 strip indices per segment, count chosen by AI based on content needs (1 for close-up beat, 2–3 for typical scene, 4–5 for extended action).`
+    : `1–5 strip indices per segment. Bias toward FEWER (1 or 2) for most segments — only use 3+ when the scene genuinely requires multiple beats. A segment with just 1 strong keyPanel is often better than 3 mediocre ones.`
   const langName = { vi: 'Vietnamese', th: 'Thai', en: 'English', ko: 'Korean', ja: 'Japanese' }[language] || 'English'
   const ctx = []
   if (mangaTitle) ctx.push(`Manga: ${mangaTitle}`)
@@ -808,9 +812,6 @@ ${(opts.rulesText || DEFAULT_RULES_TEMPLATE)
   .replace(/\$\{totalPanels\}/g, String(totalPanels))
   .replace(/\$\{persona\}/g, persona)
   .replace(/\$\{langName\}/g, langName)}
-- Each segment's text is 1–3 sentences. When spoken aloud, the duration roughly matches how long viewers should look at that segment.
-- ${persona}
-- panelStart of segment N must equal panelEnd of segment N-1 plus 1. First segment panelStart=0, last segment panelEnd=${totalPanels - 1}.
 
 Return ONLY the JSON object.`
 }
